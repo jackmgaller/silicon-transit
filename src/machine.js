@@ -12,42 +12,69 @@ export const FLEET = [
     id: 'local',
     name: 'Local',
     tagline: 'In-order, 2-wide, modest caches. Simple and frugal.',
-    cfg: { ooo: false, width: 2, window: 16, renameRegs: 0, feDepth: 4, predictor: 'bit2', alu: 2, fpu: 1, lsu: 1, simd: 1, l1KB: 16, l1Lat: 3, l2KB: 128, l2Lat: 12, memNs: 60, memGBs: 16, mshr: 2, ghz: 2 },
+    cfg: { route: 'fixed', width: 2, window: 16, sched: 0, renameRegs: 0, feDepth: 4, predictor: 'bit2', alu: 2, fpu: 1, lsu: 1, simd: 1, l1KB: 16, l1Lat: 3, l2KB: 128, l2Lat: 12, memNs: 60, memGBs: 16, mshr: 2, ghz: 2 },
   },
   {
     id: 'express',
     name: 'Express',
     tagline: 'Out-of-order, 4-wide, a deep platform and big caches.',
-    cfg: { ooo: true, width: 4, window: 96, renameRegs: 64, feDepth: 6, predictor: 'global', alu: 4, fpu: 2, lsu: 2, simd: 1, l1KB: 32, l1Lat: 4, l2KB: 512, l2Lat: 14, memNs: 60, memGBs: 32, mshr: 8, ghz: 3 },
+    cfg: { route: 'dynamic', width: 4, window: 96, sched: 32, renameRegs: 64, feDepth: 6, predictor: 'global', alu: 4, fpu: 2, lsu: 2, simd: 1, l1KB: 32, l1Lat: 4, l2KB: 512, l2Lat: 14, memNs: 60, memGBs: 32, mshr: 8, ghz: 3 },
   },
   {
     id: 'streamliner',
     name: 'Streamliner',
     tagline: 'In-order with 8-lane SIMD and a wide memory line.',
-    cfg: { ooo: false, width: 2, window: 24, renameRegs: 0, feDepth: 5, predictor: 'bit2', alu: 2, fpu: 2, lsu: 2, simd: 8, l1KB: 32, l1Lat: 4, l2KB: 512, l2Lat: 14, memNs: 60, memGBs: 64, mshr: 8, ghz: 2.5 },
+    cfg: { route: 'fixed', width: 2, window: 24, sched: 0, renameRegs: 0, feDepth: 5, predictor: 'bit2', alu: 2, fpu: 2, lsu: 2, simd: 8, l1KB: 32, l1Lat: 4, l2KB: 512, l2Lat: 14, memNs: 60, memGBs: 64, mshr: 8, ghz: 2.5 },
   },
   {
     id: 'shuttle',
     name: 'Shuttle',
     tagline: 'One lane, no L2. The smallest network that still runs.',
-    cfg: { ooo: false, width: 1, window: 8, renameRegs: 0, feDepth: 3, predictor: 'static', alu: 1, fpu: 1, lsu: 1, simd: 1, l1KB: 4, l1Lat: 2, l2KB: 0, l2Lat: 12, memNs: 60, memGBs: 8, mshr: 1, ghz: 1 },
+    cfg: { route: 'fixed', width: 1, window: 8, sched: 0, renameRegs: 0, feDepth: 3, predictor: 'static', alu: 1, fpu: 1, lsu: 1, simd: 1, l1KB: 4, l1Lat: 2, l2KB: 0, l2Lat: 12, memNs: 60, memGBs: 8, mshr: 1, ghz: 1 },
   },
   {
     id: 'grand',
     name: 'Grand Central',
     tagline: '8-wide, 256 berths, 4-lane SIMD. Everything big.',
-    cfg: { ooo: true, width: 8, window: 256, renameRegs: 192, feDepth: 8, predictor: 'tournament', alu: 6, fpu: 4, lsu: 3, simd: 4, l1KB: 64, l1Lat: 4, l2KB: 2048, l2Lat: 16, memNs: 60, memGBs: 64, mshr: 16, ghz: 3.5 },
+    cfg: { route: 'dynamic', width: 8, window: 256, sched: 96, renameRegs: 192, feDepth: 8, predictor: 'tournament', alu: 6, fpu: 4, lsu: 3, simd: 4, l1KB: 64, l1Lat: 4, l2KB: 2048, l2Lat: 16, memNs: 60, memGBs: 64, mshr: 16, ghz: 3.5 },
   },
 ];
+
+// Routing: how the platform decides which waiting vehicle departs next.
+export const ROUTES = [
+  {
+    id: 'fixed',
+    label: 'Fixed order',
+    chip: 'Fixed order',
+    help: 'In-order: instructions depart strictly in program order, so one stuck instruction holds up everything behind it. Like ARM Cortex-A53.',
+  },
+  {
+    id: 'split',
+    label: 'Split lines',
+    chip: 'Split lines',
+    help: 'Integer, floating-point and load/store work each get their own in-order line, so a stuck instruction holds up only its own line. Like the memory and FP queues of Intel Silvermont.',
+  },
+  {
+    id: 'dynamic',
+    label: 'Dynamic',
+    chip: 'Dynamic routing',
+    help: 'Out-of-order: any ready instruction on the departure board may depart first, ahead of older stuck ones.',
+  },
+];
+export const ROUTE_BY_ID = Object.fromEntries(ROUTES.map((r) => [r.id, r]));
+
+// The departure board's size in effect: 0 means the whole platform.
+export const effSched = (cfg) => (cfg.sched ? Math.min(cfg.sched, cfg.window) : cfg.window);
 
 export const PARAM_GROUPS = [
   {
     id: 'core',
     title: 'Core and platform',
     params: [
-      { key: 'ooo', label: 'Routing', kind: 'seg', options: [[false, 'Fixed order'], [true, 'Dynamic']], help: 'Fixed order issues strictly in program order (in-order). Dynamic routing lets any ready instruction depart first (out-of-order).' },
+      { key: 'route', label: 'Routing', kind: 'seg', options: ROUTES.map((r) => [r.id, r.label]), help: (c) => ROUTE_BY_ID[c.route].help },
       { key: 'width', label: 'Width', kind: 'step', min: 1, max: 8, unit: '/cycle', help: 'Instructions fetched, issued and retired per cycle.' },
       { key: 'window', label: 'Platform berths', kind: 'select', options: [4, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256], help: 'Instruction window: how many instructions can be in flight between boarding and exit.' },
+      { key: 'sched', label: 'Departure board', kind: 'select', options: [0, 4, 8, 12, 16, 24, 32, 48, 64, 96, 128], none: 'Whole platform', unit: ' slots', help: 'Scheduler: how many waiting vehicles the dispatcher can choose from. When it is full, nothing new boards even with berths free. Real out-of-order cores keep it well below the platform size.' },
       { key: 'renameRegs', label: 'Rename registers', kind: 'select', options: [0, 8, 16, 24, 32, 48, 64, 96, 128, 192, 256], none: 'None', help: 'Spare registers for renaming. Each result on its way takes one, so a register name can be reused at once. With none, an instruction must wait until older ones are done with its register.' },
       { key: 'feDepth', label: 'Entrance stops', kind: 'step', min: 2, max: 14, help: 'Front-end depth. Cycles from fetch to the platform, and the refill cost after a mispredicted branch.' },
       { key: 'predictor', label: 'Route guessing', kind: 'select', options: PREDICTORS.map((p) => p.id), help: (c) => `Branch predictor. ${PREDICTOR_BY_ID[c.predictor].help} A wrong guess closes the entrance until the branch resolves.` },
@@ -90,7 +117,7 @@ export function normalizeCfg(c) {
       if (typeof p.options[0] === 'string') out[p.key] = FLEET[0].cfg[p.key];
       else out[p.key] = p.options.reduce((a, b) => (Math.abs(b - out[p.key]) < Math.abs(a - out[p.key]) ? b : a));
     }
-    if (p.kind === 'seg') out[p.key] = !!out[p.key];
+    if (p.kind === 'seg' && !p.options.some(([v]) => v === out[p.key])) out[p.key] = FLEET[0].cfg[p.key];
   }
   return out;
 }
@@ -100,7 +127,7 @@ export const busCycles = (cfg) => Math.max(1, Math.round((64 * cfg.ghz) / cfg.me
 
 export function formatParam(key, v) {
   const p = PARAM_BY_KEY[key];
-  if (key === 'ooo') return v ? 'Dynamic' : 'Fixed order';
+  if (key === 'route') return ROUTE_BY_ID[v]?.label ?? String(v);
   if (key === 'predictor') return PREDICTOR_BY_ID[v]?.label ?? String(v);
   if (p?.none && v === 0) return p.none;
   if (key === 'l1KB' || key === 'l2KB') return v >= 1024 ? v / 1024 + ' MB' : v + ' KB';
@@ -110,9 +137,10 @@ export function formatParam(key, v) {
 
 export function specChips(cfg) {
   return [
-    { text: cfg.ooo ? 'Dynamic routing' : 'Fixed order', keys: ['ooo'] },
+    { text: ROUTE_BY_ID[cfg.route].chip, keys: ['route'] },
     { text: `${cfg.width}-wide`, keys: ['width'] },
     { text: `${cfg.window} berths`, keys: ['window'] },
+    ...(cfg.sched && cfg.sched < cfg.window ? [{ text: `${cfg.sched}-slot board`, keys: ['sched'] }] : []),
     { text: cfg.renameRegs ? `${cfg.renameRegs} rename regs` : 'No renaming', keys: ['renameRegs'] },
     { text: `${cfg.alu} ALU · ${cfg.fpu} FPU · ${cfg.lsu} LS`, keys: ['alu', 'fpu', 'lsu'] },
     { text: cfg.simd > 1 ? `SIMD ×${cfg.simd}` : 'Scalar', keys: ['simd'] },
@@ -131,6 +159,13 @@ const halfMem = (c) => {
   return h < c.memNs ? h : PARAM_BY_KEY.memNs.options[Math.max(0, PARAM_BY_KEY.memNs.options.indexOf(c.memNs) - 1)];
 };
 
+// Double the departure board, or halve it once it already covers the platform.
+const nextSched = (c) => {
+  const s = effSched(c);
+  if (s >= c.window) return snapOption('sched', c.window / 2);
+  return s * 2 >= c.window ? 0 : snapOption('sched', s * 2);
+};
+
 // The next predictor up. Local and global history both step to the
 // tournament that combines them.
 const UPGRADE = { static: 'bit1', bit1: 'bit2', bit2: 'local', local: 'tournament', global: 'tournament' };
@@ -138,7 +173,9 @@ const nextPredictor = (p) => UPGRADE[p] || p;
 
 // One-variable experiments: clone a machine and change a single thing.
 export const EXPERIMENTS = [
-  { id: 'ooo', label: (c) => (c.ooo ? 'Switch to fixed order' : 'Switch to dynamic routing'), tag: (c) => (c.ooo ? 'in-order' : 'out-of-order'), apply: (c) => ({ ...c, ooo: !c.ooo }), ok: () => true },
+  { id: 'ooo', label: (c) => (c.route === 'dynamic' ? 'Switch to fixed order' : 'Switch to dynamic routing'), tag: (c) => (c.route === 'dynamic' ? 'in-order' : 'out-of-order'), apply: (c) => ({ ...c, route: c.route === 'dynamic' ? 'fixed' : 'dynamic' }), ok: () => true },
+  { id: 'split', label: () => 'Split into per-station lines', tag: () => 'split lines', apply: (c) => ({ ...c, route: 'split' }), ok: (c) => c.route !== 'split' },
+  { id: 'sched', label: (c) => (effSched(c) < c.window ? 'Double the departure board' : 'Halve the departure board'), tag: (c) => (nextSched(c) ? `${nextSched(c)}-slot board` : 'whole-platform board'), apply: (c) => ({ ...c, sched: nextSched(c) }), ok: (c) => c.route === 'dynamic' && c.window >= 8 },
   { id: 'alu', label: () => 'Add an ALU', tag: () => '+ALU', apply: (c) => ({ ...c, alu: c.alu + 1 }), ok: (c) => c.alu < 8 },
   { id: 'fpu', label: () => 'Add an FPU', tag: () => '+FPU', apply: (c) => ({ ...c, fpu: c.fpu + 1 }), ok: (c) => c.fpu < 6 },
   { id: 'lsu', label: () => 'Add a load/store port', tag: () => '+port', apply: (c) => ({ ...c, lsu: c.lsu + 1 }), ok: (c) => c.lsu < 4 },
@@ -162,7 +199,7 @@ export function describeDiff(a, b) {
   const out = [];
   for (const p of PARAMS) {
     if (a[p.key] !== b[p.key]) {
-      const rank = (v) => (p.key === 'predictor' ? p.options.indexOf(v) : v);
+      const rank = (v) => (p.key === 'predictor' ? p.options.indexOf(v) : p.key === 'route' ? ROUTES.findIndex((r) => r.id === v) : p.key === 'sched' ? v || Infinity : v);
       out.push({ key: p.key, label: p.label, from: formatParam(p.key, a[p.key]), to: formatParam(p.key, b[p.key]), up: rank(b[p.key]) > rank(a[p.key]) });
     }
   }

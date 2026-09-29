@@ -41,7 +41,7 @@ export function readPalette() {
     PAL.typeDark[t] = darken(PAL.type[t], 0.72);
   }
   PAL.unit = { alu: PAL.type.int, fpu: PAL.type.fp, lsu: PAL.type.load };
-  const codes = ['busy', 'dep', 'mem', 'unit', 'order', 'window', 'branch', 'supply', 'drain', 'width', 'gates', 'name', 'regs'];
+  const codes = ['busy', 'dep', 'mem', 'unit', 'order', 'window', 'branch', 'supply', 'drain', 'width', 'gates', 'name', 'regs', 'sched'];
   PAL.code = codes.map((k) => get('--st-' + k, '#999999'));
   PAL.loc = ['reuse', 'near', 'cold', 'evicted'].map((k) => get('--loc-' + k, '#999999'));
   PAL.shared = get('--loc-ride', '#F2A100');

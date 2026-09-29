@@ -108,6 +108,7 @@ export class Inspector {
     add(T.entrance + 1, 'var(--line-entrance)', 'Entrance');
     add(T.hold, codeVar(C.WINDOW), 'Held outside');
     add(T.holdRegs, codeVar(C.REGS), 'No spare register');
+    add(T.holdSched, codeVar(C.SCHED), 'Board full');
     add(T.dep, codeVar(C.DEP), 'Connection');
     add(T.mem, codeVar(C.MEM), 'Memory');
     add(T.unit, codeVar(C.UNIT), 'Station full');

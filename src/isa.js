@@ -38,6 +38,8 @@ export const UNIT_LABEL = { alu: 'ALU', fpu: 'FPU', lsu: 'Load/store' };
 export const UNIT_PLURAL = { alu: 'ALUs', fpu: 'FPUs', lsu: 'load/store ports' };
 export const UNIT_NOUN = { alu: 'ALU', fpu: 'FPU', lsu: 'load/store port' };
 export const UNIT_INDEX = { alu: 0, fpu: 1, lsu: 2 };
+// Names of the per-station lines on a split-lines network.
+export const UNIT_LINE = { alu: 'ALU line', fpu: 'FPU line', lsu: 'load/store line' };
 
 // Why a vehicle (instruction) is not moving, and where issue capacity went.
 export const C = {
@@ -54,6 +56,7 @@ export const C = {
   GATES: 10, // load ready, but every memory gate (MSHR) is busy
   NAME: 11, // ready, but its register is still needed by an older instruction
   REGS: 12, // no free rename register, so nothing new can board
+  SCHED: 13, // departure board (scheduler) full, so nothing new can board
 };
 
 export const CODE_INFO = [
@@ -70,10 +73,11 @@ export const CODE_INFO = [
   { key: 'gates', label: 'Memory gates all busy', short: 'Gates full' },
   { key: 'name', label: 'Register still in use', short: 'Register in use' },
   { key: 'regs', label: 'Out of rename registers', short: 'No free registers' },
+  { key: 'sched', label: 'Departure board full', short: 'Board full' },
 ];
 
 // Codes that appear in the capacity breakdown, in display order.
-export const SLOT_CODES = [C.BUSY, C.DEP, C.MEM, C.UNIT, C.ORDER, C.NAME, C.WINDOW, C.REGS, C.BRANCH, C.SUPPLY, C.DRAIN];
+export const SLOT_CODES = [C.BUSY, C.DEP, C.MEM, C.UNIT, C.ORDER, C.NAME, C.WINDOW, C.SCHED, C.REGS, C.BRANCH, C.SUPPLY, C.DRAIN];
 
 // Registers: sixteen names, r0–r15, shared by integer, floating-point and
 // SIMD values (on SIMD networks every register is as wide as the lanes).

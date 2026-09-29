@@ -19,6 +19,9 @@ function check(tr, tag) {
   const perCycleIssue = new Map();
   const perCycleRetire = new Map();
   const unitUse = new Map();
+  // Last departure in each in-order line: one for fixed order, one per
+  // station type for split lines.
+  const lastIssue = new Map();
   for (let id = 0; id < N; id++) {
     const ins = instrs[id];
     const f = tr.fetchC[id], d = tr.dispC[id], i = tr.issueC[id], dn = tr.doneC[id], r = tr.retireC[id];
@@ -27,7 +30,11 @@ function check(tr, tag) {
       if (tr.fetchC[id] < tr.fetchC[id - 1]) fail(`${tag} #${id}: fetch out of order`);
       if (tr.dispC[id] < tr.dispC[id - 1]) fail(`${tag} #${id}: dispatch out of order`);
       if (r < tr.retireC[id - 1]) fail(`${tag} #${id}: retire out of order`);
-      if (!tr.OOO && i < tr.issueC[id - 1]) fail(`${tag} #${id}: in-order machine issued out of order`);
+    }
+    if (!tr.OOO) {
+      const line = tr.SPLIT ? ins.unit : 'all';
+      if (i < (lastIssue.get(line) ?? -1)) fail(`${tag} #${id}: ${tr.ROUTE} line ${line} issued out of order`);
+      lastIssue.set(line, i);
     }
     for (const p of ins.src) {
       if (p >= id) fail(`${tag} #${id}: forward dependency ${p}`);
@@ -50,6 +57,7 @@ function check(tr, tag) {
   let slotSum = 0;
   for (let c = 0; c < tr.cycles; c++) {
     if (cyc.rob[c] > WIN) fail(`${tag}: rob ${cyc.rob[c]} > ${WIN}`);
+    if (cyc.onBoard[c] > tr.SCHED) fail(`${tag}: ${cyc.onBoard[c]} on the departure board > ${tr.SCHED}`);
     if (cyc.mshr[c] > tr.MSHR) fail(`${tag}: mshr overflow`);
     slotSum += W;
   }
@@ -208,7 +216,9 @@ for (const row of rows) {
     };
     const wl = generateWorkload(params);
     for (const m of [FLEET[0], FLEET[2], FLEET[4]]) {
-      const cfg = normalizeCfg({ ...m.cfg, renameRegs: k % 3 === 0 ? 0 : m.cfg.renameRegs, predictor: PREDICTORS[k % PREDICTORS.length].id });
+      const route = ['fixed', 'split', 'dynamic'][k % 3];
+      const sched = [0, 4, 8, 16, 32][k % 5];
+      const cfg = normalizeCfg({ ...m.cfg, route, sched, renameRegs: k % 4 === 0 ? 0 : m.cfg.renameRegs, predictor: PREDICTORS[k % PREDICTORS.length].id });
       check(simulate(wl, cfg), `random${k}/${m.id}`);
     }
   }

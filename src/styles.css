@@ -56,6 +56,7 @@
   --st-gates: #1C5DB8;
   --st-name: #A0661B;
   --st-regs: #5B45D6;
+  --st-sched: #B04FA8;
 
   /* Cache yard: how an access found its line in L1 */
   --loc-reuse: #22A45D;
@@ -1045,6 +1046,16 @@ select {
   gap: 10px;
   padding: 4px 0;
   border-bottom: 1px dotted var(--rule);
+}
+
+.param-stack {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 5px;
+}
+
+.param-stack .seg {
+  align-self: flex-start;
 }
 
 .param:last-child {

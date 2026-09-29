@@ -8,6 +8,17 @@ import { PAL, withAlpha } from './palette.js';
 import { C, LVL, OPS, LOC, NREG, regName } from './isa.js';
 import { waitAt, headAt, oldestWaiting, fmtInt, cycleAt, regVersions, writersAt, yardModel, lineWhere, accessesOf } from './analysis.js';
 
+// Split lines: which line each kind of station's work joins, and its sign.
+const LINE_OF = { alu: 0, fpu: 1, lsu: 2 };
+const LINE_SIGN = { alu: 'INTEGER LINE', fpu: 'FLOATING-POINT LINE', lsu: 'LOAD / STORE LINE' };
+
+// Platform sign for each kind of routing: title and a short note.
+const ROUTE_SIGN = {
+  fixed: ['FIXED ORDER', 'departures strictly in order'],
+  split: ['SPLIT LINES', 'in order within each station’s line'],
+  dynamic: ['DYNAMIC ROUTING', 'any ready vehicle may depart'],
+};
+
 const DEPOT_N = 6;
 export const K = { DEPOT: 0, FE: 1, BERTH: 2, UNIT: 3, MEM: 4, EXIT: 5 };
 const AT = { PATH: 0, L1: 1, BAY: 2, GATE: 3 };
@@ -114,7 +125,7 @@ export class NetworkView {
     const i = tr.issueC[id];
     if (c < i) {
       const w = waitAt(tr, id, c);
-      return { k: K.BERTH, slot: tr.slot[id], st: 0, code: w ? w[2] : -1 };
+      return { k: K.BERTH, slot: this.berthSlot(id, c), st: 0, code: w ? w[2] : -1 };
     }
     const dn = tr.doneC[id];
     if (c < dn) {
@@ -123,9 +134,22 @@ export class NetworkView {
       return this.memSnap(id, c, i, dn);
     }
     const r = tr.retireC[id];
-    if (c < r) return { k: K.BERTH, slot: tr.slot[id], st: 1, code: -1 };
+    if (c < r) return { k: K.BERTH, slot: this.berthSlot(id, c), st: 1, code: -1 };
     const age = c - r;
-    return age <= 1 ? { k: K.EXIT, n: age, slot: tr.slot[id] } : null;
+    return age <= 1 ? { k: K.EXIT, n: age, slot: this.berthSlot(id, r - 1) } : null;
+  }
+
+  // The berth instruction id occupies during cycle c while aboard. Normally
+  // its platform slot; on split lines, its place in its own line, counting
+  // the older vehicles of its kind still aboard, so each line moves up as
+  // they exit.
+  berthSlot(id, c) {
+    const tr = this.tr;
+    const lines = this.L.lines;
+    if (!lines) return tr.slot[id];
+    const ln = lines[LINE_OF[tr.instrs[id].unit]];
+    const head = headAt(tr, c);
+    return ln.base + ln.prefix[id] - ln.prefix[head < 0 || head > id ? id : head];
   }
 
   // First instruction not yet fetched at cycle c (the top of the depot board).
@@ -352,7 +376,7 @@ export class NetworkView {
     const head = headAt(tr, c);
     if (head < 0) return -1;
     for (let id = head; id < tr.N && tr.dispC[id] <= c && tr.dispC[id] >= 0; id++) {
-      const b = L.berth(tr.slot[id]);
+      const b = L.berth(this.berthSlot(id, c));
       if (Math.abs(mx - b.x) <= L.bw / 2 + 1 && Math.abs(my - b.y) <= L.bh / 2 + 1) return id;
     }
     return -1;
@@ -399,7 +423,8 @@ export class NetworkView {
     // Dynamic routing: vehicles departing past an older, stuck one get a glow.
     // Vehicles departing between c and c+1 glow when an older one is still
     // stuck after that departure (it is being overtaken).
-    const oldest = tr.OOO && !done ? oldestWaiting(tr, c + 1) : -1;
+    // On split lines only overtaking across lines is possible.
+    const oldest = tr.ROUTE !== 'fixed' && !done ? oldestWaiting(tr, c + 1) : -1;
     for (const it of items) {
       const dim = hasSel && !related.has(it.id);
       if (oldest >= 0 && it.id > oldest && it.a && it.a.k === K.BERTH && it.b && (it.b.k === K.UNIT || it.b.k === K.MEM) && e > 0.02 && e < 0.98) {
@@ -526,11 +551,15 @@ export class NetworkView {
     rr(ctx, X.platX0, L.platY0, X.platX1 - X.platX0, L.platY1 - L.platY0, 12);
     ctx.fill();
     ctx.stroke();
-    const routeTitle = cfg.ooo ? 'DYNAMIC ROUTING' : 'FIXED ORDER';
-    this.label(routeTitle, X.platX0 + 12, L.platY0 + 12, { size: 8, weight: 800, color: cfg.ooo ? PAL.accent : PAL.ink2, spacing: 1 });
+    const [routeTitle, routeNote] = ROUTE_SIGN[tr.ROUTE];
+    this.label(routeTitle, X.platX0 + 12, L.platY0 + 12, { size: 8, weight: 800, color: tr.ROUTE === 'fixed' ? PAL.ink2 : PAL.accent, spacing: 1 });
     const titleW = this.textWidth(routeTitle, 8, 800, 1);
-    this.label(cfg.ooo ? 'any ready vehicle may depart' : 'departures strictly in order', X.platX0 + 12 + titleW + 7, L.platY0 + 12, { size: 7.5, weight: 500, color: PAL.ink3 });
-    for (let s = 0; s < tr.WIN; s++) {
+    // The note gives way to the counters on the right when space is short.
+    let counters = this.textWidth(`${tr.WIN} / ${tr.WIN} aboard`, 8.5, 800) + 16;
+    if (tr.SCHED < tr.WIN) counters += this.textWidth(`board ${tr.SCHED} / ${tr.SCHED}`, 8.5, 800) + 10;
+    const noteX = X.platX0 + 12 + titleW + 7;
+    if (noteX + this.textWidth(routeNote, 7.5, 500) <= X.platX1 - 12 - counters) this.label(routeNote, noteX, L.platY0 + 12, { size: 7.5, weight: 500, color: PAL.ink3 });
+    for (let s = 0; s < L.slots; s++) {
       const b = L.berth(s);
       rr(ctx, b.x - L.bw / 2, b.y - L.bh / 2, L.bw, L.bh, Math.min(3, L.bh / 3));
       ctx.fillStyle = '#F1F3F2';
@@ -538,6 +567,20 @@ export class NetworkView {
       ctx.strokeStyle = PAL.rule;
       ctx.lineWidth = 0.8;
       ctx.stroke();
+    }
+    // Split lines: a colored rule and name above each station type's line,
+    // with the front of the line on the left.
+    if (L.lines) {
+      for (const ln of L.lines) {
+        const col = PAL.unit[ln.unit];
+        const first = L.berth(ln.base);
+        const last = L.berth(ln.base + ln.cap - 1);
+        const x0 = L.gridX0 - 4;
+        ctx.fillStyle = col;
+        rr(ctx, x0, first.y - L.bh / 2, 2.5, last.y - first.y + L.bh, 1.25);
+        ctx.fill();
+        this.label(LINE_SIGN[ln.unit], L.gridX0, ln.headY, { size: 7, weight: 800, color: col, spacing: 0.8 });
+      }
     }
 
     // Register board: sixteen names, each showing whose result it holds.
@@ -642,13 +685,25 @@ export class NetworkView {
     rr(ctx, X.busX - 9, L.yc - 13, 18, 26, 9);
     ctx.fill();
     ctx.stroke();
-    if (cfg.ooo) {
+    if (tr.ROUTE === 'dynamic') {
       ctx.strokeStyle = PAL.accent;
       ctx.lineWidth = 1.6;
       ctx.beginPath();
       for (const dy of [-6, 0, 6]) {
         ctx.moveTo(X.busX - 4, L.yc);
         ctx.lineTo(X.busX + 4, L.yc + dy);
+      }
+      ctx.stroke();
+    } else if (tr.ROUTE === 'split') {
+      // Three short lines, each with its own stop bar.
+      ctx.strokeStyle = PAL.accent;
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      for (const dy of [-6, 0, 6]) {
+        ctx.moveTo(X.busX - 4, L.yc + dy);
+        ctx.lineTo(X.busX + 4, L.yc + dy);
+        ctx.moveTo(X.busX - 4, L.yc + dy - 2);
+        ctx.lineTo(X.busX - 4, L.yc + dy + 2);
       }
       ctx.stroke();
     } else {
@@ -819,7 +874,7 @@ export class NetworkView {
       const d = tr.dispC[id];
       if (d < 0 || d > c) break;
       if (tr.issueC[id] <= c && tr.doneC[id] > c) {
-        const b = L.berth(tr.slot[id]);
+        const b = L.berth(this.berthSlot(id, c));
         const col = PAL.type[tr.instrs[id].type];
         rr(ctx, b.x - L.bw / 2 + 0.5, b.y - L.bh / 2 + 0.5, L.bw - 1, L.bh - 1, 2.5);
         ctx.fillStyle = withAlpha(col, 0.1);
@@ -831,7 +886,7 @@ export class NetworkView {
     ctx.setLineDash([]);
     // Head of the platform: next to exit.
     if (tr.dispC[head] >= 0 && tr.dispC[head] <= c) {
-      const b = L.berth(tr.slot[head]);
+      const b = L.berth(this.berthSlot(head, c));
       ctx.fillStyle = PAL.ink;
       ctx.beginPath();
       ctx.moveTo(b.x - 3.5, b.y + L.bh / 2 + 1.5);
@@ -840,11 +895,13 @@ export class NetworkView {
       ctx.closePath();
       ctx.fill();
     }
-    // Fixed order: only the oldest waiting vehicle may depart.
+    // Fixed order: only the oldest waiting vehicle may depart. Split lines:
+    // only the oldest waiting vehicle in each station type's line.
     if (!tr.OOO) {
-      const nx = oldestWaiting(tr, c);
-      if (nx >= 0 && tr.issueC[nx] > c) {
-        const b = L.berth(tr.slot[nx]);
+      for (const unit of tr.SPLIT ? ['alu', 'fpu', 'lsu'] : [undefined]) {
+        const nx = oldestWaiting(tr, c, unit);
+        if (nx < 0 || tr.issueC[nx] <= c) continue;
+        const b = L.berth(this.berthSlot(nx, c));
         const w = waitAt(tr, nx, c);
         const blocked = w && w[2] !== C.WIDTH;
         ctx.strokeStyle = blocked ? PAL.code[C.UNIT] : PAL.good;
@@ -882,17 +939,32 @@ export class NetworkView {
       this.label(`HOLD · wrong route #${tr.instrs[b].num}`, x + 10, y, { size: 8, weight: 800, color: PAL.code[C.BRANCH] });
     } else if (refill) {
       this.label('refilling after wrong route', x + 10, y, { size: 8, weight: 700, color: PAL.ink2 });
+    } else {
+      // A branch guessed right just resolved: one green ripple, fading out.
+      const b = rightRouteAt(tr, T);
+      if (b >= 0) {
+        const age = (T - tr.doneC[b]) / RIGHT_ROUTE_CYCLES;
+        const a = 1 - age;
+        ctx.beginPath();
+        ctx.arc(x, y, 6 + age * 7, 0, Math.PI * 2);
+        ctx.strokeStyle = withAlpha(PAL.good.startsWith('#') ? PAL.good : '#22A45D', 0.55 * a);
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.globalAlpha = Math.min(1, a * 1.6);
+        this.label(`✓ right route #${tr.instrs[b].num}`, x + 10, y, { size: 8, weight: 800, color: PAL.good });
+        ctx.globalAlpha = 1;
+      }
     }
     // Boarding held at the end of the entrance.
     const stop = c < tr.cycles && cc >= 0 ? tr.cyc.board[cc] : 0;
-    if (stop === C.REGS || stop === C.WINDOW) {
-      const col = stop === C.REGS ? PAL.code[C.REGS] : PAL.code[C.UNIT];
+    if (stop === C.REGS || stop === C.WINDOW || stop === C.SCHED) {
+      const col = stop === C.WINDOW ? PAL.code[C.UNIT] : PAL.code[stop];
       const y0 = L.laneY[0] - 7;
       const y1 = L.laneY[tr.W - 1] + 7;
       ctx.fillStyle = col;
       rr(ctx, X.holdX + 8, y0, 3, y1 - y0, 1.5);
       ctx.fill();
-      this.label(stop === C.REGS ? 'HOLD · no spare register' : 'HOLD · platform full', X.holdX + 10, y1 + 8, { size: 7.5, weight: 800, color: col, align: 'right' });
+      this.label(stop === C.REGS ? 'HOLD · no spare register' : stop === C.SCHED ? 'HOLD · departure board full' : 'HOLD · platform full', X.holdX + 10, y1 + 8, { size: 7.5, weight: 800, color: col, align: 'right' });
     }
   }
 
@@ -1647,7 +1719,14 @@ export class NetworkView {
     const aboard = done ? 0 : tr.cyc.rob[cc];
     const head = headAt(tr, c);
     const exited = done || head < 0 ? tr.N : head;
-    this.label(`${aboard} / ${tr.WIN} aboard`, X.platX1 - 12, L.platY0 + 12, { size: 8.5, weight: 800, color: aboard >= tr.WIN ? PAL.code[C.UNIT] : PAL.ink, align: 'right' });
+    const aboardText = `${aboard} / ${tr.WIN} aboard`;
+    this.label(aboardText, X.platX1 - 12, L.platY0 + 12, { size: 8.5, weight: 800, color: aboard >= tr.WIN ? PAL.code[C.UNIT] : PAL.ink, align: 'right' });
+    // Departure board: vehicles aboard that have yet to depart.
+    if (tr.SCHED < tr.WIN) {
+      const waiting = done ? 0 : tr.cyc.onBoard[cc];
+      const x = X.platX1 - 12 - this.textWidth(aboardText, 8.5, 800) - 10;
+      this.label(`board ${waiting} / ${tr.SCHED}`, x, L.platY0 + 12, { size: 8.5, weight: 800, color: waiting >= tr.SCHED ? PAL.code[C.SCHED] : PAL.ink2, align: 'right' });
+    }
     // Terminus sign above the vehicles, so exits slide in underneath it.
     ctx.fillStyle = PAL.ink;
     rr(ctx, 14, L.termY - 10, 86, 20, 10);
@@ -1687,6 +1766,27 @@ export class NetworkView {
     this.label('SERVICE COMPLETE', x, y - 8, { size: 10, weight: 800, color: PAL.good, align: 'center', spacing: 1.5 });
     this.label(`${fmtInt(tr.cycles)} cycles · ${fmtNs(tr.cycles / tr.cfg.ghz)}`, x, y + 9, { size: 10, weight: 700, color: PAL.ink, align: 'center' });
   }
+}
+
+// How long the signal shows a right guess after its branch resolves.
+const RIGHT_ROUTE_CYCLES = 3;
+
+// The branch guessed right that resolved most recently, if that was within
+// the last few cycles at time T; -1 otherwise.
+function rightRouteAt(tr, T) {
+  const done = (tr.rightRoutes ||= tr.instrs
+    .filter((ins) => ins.type === 'branch' && !ins.mispredict)
+    .map((ins) => ins.id)
+    .sort((a, b) => tr.doneC[a] - tr.doneC[b]));
+  let lo = 0;
+  let hi = done.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (tr.doneC[done[mid]] <= T) lo = mid + 1;
+    else hi = mid;
+  }
+  const b = lo > 0 ? done[lo - 1] : -1;
+  return b >= 0 && T - tr.doneC[b] < RIGHT_ROUTE_CYCLES ? b : -1;
 }
 
 function fmtKB(kb) {

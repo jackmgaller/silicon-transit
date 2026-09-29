@@ -45,9 +45,13 @@ export function computeLayout(tr) {
   let stationsH = -groupGap;
   for (const g of groups) stationsH += groupLabelH + g.n * trackGap + groupGap;
 
-  // Platform: the instruction window as a grid of berths.
+  // Platform: the instruction window as a grid of berths. On a split-lines
+  // network it is drawn as one line per kind of station instead, each with
+  // room for the most vehicles of its kind that were ever aboard at once.
   const cols = WIN <= 16 ? WIN : WIN <= 128 ? 16 : 32;
-  const rows = Math.ceil(WIN / cols);
+  const lines = tr.SPLIT ? splitLines(tr, cols) : null;
+  const rows = lines ? lines.reduce((n, ln) => n + ln.rows, 0) : Math.ceil(WIN / cols);
+  const lineHeadH = lines ? 15 : 0;
   const gapX = cols >= 32 ? 1.5 : 3;
   const innerW = X.platX1 - X.platX0 - 20;
   const bw = Math.min(30, (innerW - (cols - 1) * gapX) / cols);
@@ -55,7 +59,7 @@ export function computeLayout(tr) {
   const aisle = cols >= 32 ? 4.5 : 6;
   const rowH = bh + aisle;
   const gridW = cols * bw + (cols - 1) * gapX;
-  const platInnerH = rows * rowH + aisle;
+  const platInnerH = rows * rowH + aisle + (lines ? lines.length * lineHeadH : 0);
   const platH = platInnerH + 30;
 
   // Register board above the platform: the sixteen names in two rows.
@@ -110,12 +114,24 @@ export function computeLayout(tr) {
   L.gridX0 = X.platX0 + (X.platX1 - X.platX0 - gridW) / 2;
   L.gridX1 = L.gridX0 + gridW;
   L.gridY0 = L.platY0 + 22 + aisle;
+  // Top of each berth row; split lines add a heading above each line.
+  const rowLine = new Int8Array(rows);
+  if (lines) for (const ln of lines) rowLine.fill(ln.index, ln.row0, ln.row0 + ln.rows);
+  const rowTop = (r) => L.gridY0 + r * rowH + (lines ? (rowLine[Math.max(0, Math.min(rows - 1, r))] + 1) * lineHeadH : 0);
   L.berth = (slot) => {
     const r = Math.floor(slot / cols);
     const c = slot % cols;
-    return { x: L.gridX0 + c * (bw + gapX) + bw / 2, y: L.gridY0 + r * rowH + bh / 2, row: r, col: c };
+    return { x: L.gridX0 + c * (bw + gapX) + bw / 2, y: rowTop(r) + bh / 2, row: r, col: c };
   };
-  L.aisleY = (row) => L.gridY0 + row * rowH - aisle / 2;
+  L.aisleY = (row) => rowTop(row) - aisle / 2;
+  L.slots = lines ? rows * cols : WIN;
+  L.lines = lines;
+  if (lines) {
+    for (const ln of lines) {
+      ln.base = ln.row0 * cols;
+      ln.headY = rowTop(ln.row0) - aisle - lineHeadH / 2 + 2;
+    }
+  }
 
   // Station tracks.
   const stY0 = TOP + (contentH - stationsH) / 2;
@@ -214,4 +230,35 @@ export function computeLayout(tr) {
   L.termSignX = 58;
   L.H = L.termY + 26;
   return L;
+}
+
+// Split lines: one line per kind of station, in the order the station groups
+// are stacked. Each line gets whole rows, enough for the most vehicles of its
+// kind that were aboard at once. prefix[k][id] counts line-k vehicles older
+// than id, so a vehicle's place in its line is a difference of two prefixes.
+const LINE_UNITS = ['alu', 'fpu', 'lsu'];
+
+function splitLines(tr, cols) {
+  const { N, instrs } = tr;
+  const prefix = LINE_UNITS.map(() => new Int32Array(N + 1));
+  for (let id = 0; id < N; id++) {
+    const k = LINE_UNITS.indexOf(instrs[id].unit);
+    for (let q = 0; q < 3; q++) prefix[q][id + 1] = prefix[q][id] + (q === k ? 1 : 0);
+  }
+  // Aboard during cycle c: boarded at or before c, not yet exited.
+  const peak = [0, 0, 0];
+  let head = 0;
+  let tail = 0;
+  for (let c = 0; c < tr.cycles; c++) {
+    while (head < N && tr.retireC[head] <= c) head++;
+    while (tail < N && tr.dispC[tail] >= 0 && tr.dispC[tail] <= c) tail++;
+    for (let q = 0; q < 3; q++) peak[q] = Math.max(peak[q], prefix[q][Math.max(head, tail)] - prefix[q][head]);
+  }
+  let row0 = 0;
+  return LINE_UNITS.map((unit, index) => {
+    const rows = Math.max(1, Math.ceil(peak[index] / cols));
+    const ln = { unit, index, rows, row0, cap: rows * cols, prefix: prefix[index] };
+    row0 += rows;
+    return ln;
+  });
 }

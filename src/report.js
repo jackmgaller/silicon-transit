@@ -4,6 +4,7 @@
 import { h, clear } from './dom.js';
 import { C, CODE_INFO, SLOT_CODES, LOC, LOC_INFO } from './isa.js';
 import { PRESETS } from './workload.js';
+import { formatParam } from './machine.js';
 import { fmtInt, fmtTime, fmtX, pct, verdict, compareNarrative, limitSentence, bottleneck, FLOOR_INFO } from './analysis.js';
 
 const codeVar = (code) => `var(--st-${CODE_INFO[code].key})`;
@@ -49,7 +50,7 @@ export function renderReport(root, app) {
       h('div', { class: 'time-row', vars: { '--line': M.color } },
         h('div', { class: 'time-who' },
           h('span', { class: 'bullet' }, M.letter),
-          h('div', { style: 'min-width:0' }, h('strong', null, M.name), h('span', null, `${M.cfg.ooo ? 'Dynamic' : 'Fixed order'} · ${M.cfg.width}-wide · ${M.cfg.ghz.toFixed(1)} GHz`)),
+          h('div', { style: 'min-width:0' }, h('strong', null, M.name), h('span', null, `${formatParam('route', M.cfg.route)} · ${M.cfg.width}-wide · ${M.cfg.ghz.toFixed(1)} GHz`)),
         ),
         h('div', { class: 'time-bar', role: 'img', 'aria-label': `${fmtTime(s.ns)}` }, h('i', { style: `width:${Math.max(2, (s.ns / maxNs) * 100)}%` })),
         h('div', { class: 'time-fig' },

@@ -3,9 +3,9 @@
 // finished and exited, why it waited in between, and per-cycle occupancy.
 // Everything on screen is read from this trace.
 
-import { OPS, C, LVL, LOC, NREG } from './isa.js';
+import { OPS, C, LVL, LOC, NREG, UNIT_INDEX } from './isa.js';
 import { Cache } from './cache.js';
-import { memCycles, busCycles } from './machine.js';
+import { memCycles, busCycles, effSched } from './machine.js';
 import { predictBranches } from './predictor.js';
 
 // ---------------------------------------------------------------------------
@@ -160,7 +160,13 @@ export function simulate(workload, cfg) {
   const W = cfg.width | 0;
   const FE = cfg.feDepth | 0;
   const WIN = cfg.window | 0;
-  const OOO = !!cfg.ooo;
+  // Routing: 'fixed' departs in program order, 'split' in program order
+  // within each station type's own line, 'dynamic' any ready vehicle.
+  const ROUTE = cfg.route;
+  const OOO = ROUTE === 'dynamic';
+  const SPLIT = ROUTE === 'split';
+  // Departure board (scheduler): vehicles aboard that have not departed.
+  const SCHED = effSched(cfg);
   const L1LAT = Math.max(1, cfg.l1Lat | 0);
   const HAS_L2 = cfg.l2KB > 0;
   const L2LAT = HAS_L2 ? Math.max(cfg.l2Lat | 0, L1LAT + 2) : L1LAT;
@@ -256,6 +262,8 @@ export function simulate(workload, cfg) {
   let retired = 0;
   // Register-writing instructions aboard: each holds a rename register.
   let writers = 0;
+  // Vehicles aboard that have not departed yet: each holds a board slot.
+  let onBoard = 0;
   const memActive = [];
   const lost = [];
 
@@ -286,6 +294,7 @@ export function simulate(workload, cfg) {
     nName: new Grow(Uint16Array),
     nReady: new Grow(Uint16Array),
     writers: new Grow(Uint16Array),
+    onBoard: new Grow(Uint16Array),
     board: new Grow(Uint8Array),
     l1Run: new Grow(Uint32Array),
     l1Size: new Grow(Uint32Array),
@@ -449,6 +458,11 @@ export function simulate(workload, cfg) {
     return true;
   }
 
+  // In-order holds: one line for fixed order, one per station type for
+  // split lines (indexed by UNIT_INDEX). A held line keeps every younger
+  // vehicle in it from departing.
+  const held = [-1, -1, -1];
+
   const MAXC = 4000000;
   let c = 0;
   while (retired < N && c < MAXC) {
@@ -493,14 +507,14 @@ export function simulate(workload, cfg) {
     let nWait = 0;
     let nReady = 0;
     lost.length = 0;
-    let blocked = false;
-    let blocker = -1;
+    held.fill(-1);
     let nDep = 0, nMem = 0, nUA = 0, nUF = 0, nUL = 0, nOrd = 0, nWid = 0, nGat = 0, nNam = 0;
     let nb;
     for (let k = 0; k < robLen; k++) {
       const id = rob[(robHead + k) % WIN];
       if (issueC[id] >= 0) continue;
       const ins = instrs[id];
+      const line = SPLIT ? UNIT_INDEX[ins.unit] : 0;
       let blk = -1;
       let blkT = -1;
       let blkUn = false;
@@ -530,27 +544,21 @@ export function simulate(workload, cfg) {
           rc = C.DEP;
         }
         ref = blk;
-        if (!OOO && !blocked) {
-          blocked = true;
-          blocker = id;
-        }
+        if (!OOO && held[line] < 0) held[line] = id;
       } else if (!RENAME && ins.dst >= 0 && (nb = nameBlock(ins, c)) >= 0) {
         code = C.NAME;
         ref = nb;
         rc = C.NAME;
-        if (!OOO && !blocked) {
-          blocked = true;
-          blocker = id;
-        }
+        if (!OOO && held[line] < 0) held[line] = id;
       } else if (nIss >= W) {
         // Every departure slot is taken, so this ready instruction could not
         // have left this cycle whatever the timetable said.
         code = C.WIDTH;
         rc = C.WIDTH;
         nReady++;
-      } else if (!OOO && blocked) {
+      } else if (!OOO && held[line] >= 0) {
         code = C.ORDER;
-        ref = blocker;
+        ref = held[line];
         rc = C.ORDER;
         nReady++;
       } else {
@@ -567,18 +575,12 @@ export function simulate(workload, cfg) {
           code = C.UNIT;
           ref = ins.unit === 'alu' ? 0 : ins.unit === 'fpu' ? 1 : 2;
           rc = C.UNIT;
-          if (!OOO && !blocked) {
-            blocked = true;
-            blocker = id;
-          }
+          if (!OOO && held[line] < 0) held[line] = id;
         } else if (ins.type === 'load' && !loadAccess(id, ins, c)) {
           code = C.GATES;
           ref = gatesNeeded;
           rc = C.MEM;
-          if (!OOO && !blocked) {
-            blocked = true;
-            blocker = id;
-          }
+          if (!OOO && held[line] < 0) held[line] = id;
         } else {
           issueC[id] = c;
           unitIdx[id] = u;
@@ -586,6 +588,7 @@ export function simulate(workload, cfg) {
           uf[u] = ins.pipe ? c + 1 : c + ins.lat;
           unitBusy[ins.unit] += ins.pipe ? 1 : ins.lat;
           closeWait(id, c);
+          onBoard--;
           nIss++;
           continue;
         }
@@ -615,6 +618,10 @@ export function simulate(workload, cfg) {
         boardStop = C.WINDOW;
         break;
       }
+      if (onBoard >= SCHED) {
+        boardStop = C.SCHED;
+        break;
+      }
       if (RENAME && instrs[feHead].dst >= 0 && writers >= RENAME) {
         boardStop = C.REGS;
         break;
@@ -624,6 +631,7 @@ export function simulate(workload, cfg) {
       slot[id] = (robHead + robLen) % WIN;
       rob[slot[id]] = id;
       robLen++;
+      onBoard++;
       nD++;
       if (instrs[id].dst >= 0) writers++;
     }
@@ -664,7 +672,7 @@ export function simulate(workload, cfg) {
       if (k < lost.length) code = lost[k];
       else if (c >= slotFrom && c < brUntil) code = C.BRANCH;
       else if (robLen >= WIN) code = C.WINDOW;
-      else if (boardStop === C.REGS) code = C.REGS;
+      else if (boardStop === C.REGS || boardStop === C.SCHED) code = boardStop;
       else if (fetchPtr >= N) code = C.DRAIN;
       else code = C.SUPPLY;
       cy.slots.push(code);
@@ -718,6 +726,7 @@ export function simulate(workload, cfg) {
     cy.nName.push(nNam);
     cy.nReady.push(nReady);
     cy.writers.push(writers);
+    cy.onBoard.push(onBoard);
     cy.board.push(boardStop);
     cy.l1Run.push(runRes);
     cy.l1Size.push(l1.size);
@@ -743,7 +752,10 @@ export function simulate(workload, cfg) {
     W,
     FE,
     WIN,
+    ROUTE,
     OOO,
+    SPLIT,
+    SCHED,
     L1LAT,
     L2LAT,
     HAS_L2,

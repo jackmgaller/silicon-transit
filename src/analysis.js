@@ -1,7 +1,7 @@
 // Metrics and explanations, all computed from a simulation trace.
 
-import { C, CODE_INFO, SLOT_CODES, LVL, OPS, UNIT_LABEL, UNIT_PLURAL, UNIT_NOUN, LOC, NREG, regName, hex } from './isa.js';
-import { describeDiff, formatParam } from './machine.js';
+import { C, CODE_INFO, SLOT_CODES, LVL, OPS, UNIT_LABEL, UNIT_PLURAL, UNIT_NOUN, UNIT_LINE, LOC, NREG, regName, hex } from './isa.js';
+import { describeDiff, formatParam, ROUTE_BY_ID } from './machine.js';
 import { HOT_BASE, HOT_BYTES, HEAP_BASE, ARRAY_BASE, ARRAY_STRIDE, SITE_KINDS } from './workload.js';
 import { PREDICTOR_BY_ID } from './predictor.js';
 
@@ -35,19 +35,21 @@ export function headAt(tr, c) {
   return lo;
 }
 
-// Oldest instruction on the platform that has not departed at cycle c.
-export function oldestWaiting(tr, c) {
+// Oldest instruction on the platform that has not departed at cycle c,
+// optionally only among those bound for one kind of station.
+export function oldestWaiting(tr, c, unit) {
   const h = headAt(tr, c);
   if (h < 0) return -1;
   for (let id = h; id < tr.N; id++) {
     if (tr.dispC[id] < 0 || tr.dispC[id] > c) return -1;
-    if (tr.issueC[id] > c) return id;
+    if (tr.issueC[id] > c && (!unit || tr.instrs[id].unit === unit)) return id;
   }
   return -1;
 }
 
-// On a fixed-order network, the instruction that ready instructions are held
-// behind during cycle c (the ref of their ORDER waits), or -1.
+// On a fixed-order or split-lines network, the instruction that ready
+// instructions are held behind during cycle c (the ref of the oldest ORDER
+// wait), or -1.
 export function orderBlocker(tr, c) {
   const first = oldestWaiting(tr, c);
   if (first < 0) return -1;
@@ -333,7 +335,11 @@ export function computeStats(tr) {
   let nameWait = 0;
   let writersPeak = 0;
   let regsHeld = 0;
+  let schedHeld = 0;
+  let boardPeak = 0;
   for (let c = 0; c < cycles; c++) {
+    if (cyc.board[c] === C.SCHED) schedHeld++;
+    if (cyc.onBoard[c] > boardPeak) boardPeak = cyc.onBoard[c];
     nameWait += cyc.nName[c];
     if (cyc.writers[c] > writersPeak) writersPeak = cyc.writers[c];
     if (cyc.board[c] === C.REGS) regsHeld++;
@@ -366,6 +372,8 @@ export function computeStats(tr) {
   s.nameWait = nameWait;
   s.writersPeak = writersPeak;
   s.regsHeld = regsHeld;
+  s.schedHeld = schedHeld;
+  s.boardPeak = boardPeak;
 
   // How loads found their lines in L1, by kind of locality.
   const ll = tr.loc.load;
@@ -429,10 +437,11 @@ export const LOSS_TEXT = {
   [C.DEP]: 'instructions waiting for results from earlier ones',
   [C.MEM]: 'instructions waiting on data from the caches or main memory',
   [C.UNIT]: 'ready instructions finding every station of their kind busy',
-  [C.ORDER]: 'ready instructions held behind a stuck one by the fixed timetable',
+  [C.ORDER]: 'ready instructions held in line behind a stuck one',
   [C.NAME]: 'instructions waiting for older ones to finish with a register name they reuse',
   [C.WINDOW]: 'a full platform, so nothing new could board',
   [C.REGS]: 'running out of rename registers, so nothing new could board',
+  [C.SCHED]: 'a full departure board, so nothing new could board',
   [C.BRANCH]: 'recovering from mispredicted branches',
   [C.SUPPLY]: 'the entrance not delivering instructions fast enough',
   [C.DRAIN]: 'the last few instructions finishing',
@@ -480,7 +489,7 @@ export function findEpisodes(tr) {
     const counts = new Float64Array(16);
     for (let c = start; c < end; c++) for (let k = 0; k < W; k++) counts[cyc.slots[c * W + k]]++;
     let code = C.DEP;
-    for (const k of [C.DEP, C.MEM, C.UNIT, C.ORDER, C.NAME, C.WINDOW, C.REGS, C.BRANCH, C.SUPPLY, C.DRAIN]) if (counts[k] > counts[code]) code = k;
+    for (const k of [C.DEP, C.MEM, C.UNIT, C.ORDER, C.NAME, C.WINDOW, C.SCHED, C.REGS, C.BRANCH, C.SUPPLY, C.DRAIN]) if (counts[k] > counts[code]) code = k;
     eps.push({ start, end, code });
   };
   for (let c = 0; c < cycles; c++) {
@@ -557,7 +566,7 @@ export function waitClause(tr, id, code, ref) {
       return `ready, but ${allUnits(unit, tr.unitCount[unit]).replace(/^The|^Both|^All/, (m) => m.toLowerCase())} busy`;
     }
     case C.ORDER:
-      return `ready, but held behind ${label(tr, ref)} by the fixed timetable`;
+      return tr.SPLIT ? `ready, but held behind ${label(tr, ref)} in the ${UNIT_LINE[tr.instrs[id].unit]}` : `ready, but held behind ${label(tr, ref)} by the fixed timetable`;
     case C.WIDTH:
       return `ready, but all ${tr.W} departure slots were taken`;
     case C.GATES:
@@ -603,7 +612,12 @@ export function cycleStatus(tr, c) {
     const b = orderBlocker(tr, c);
     if (b >= 0) {
       const k = cyc.nOrder[c];
-      out.push({ sev: iss === 0 ? 3 : 2, text: `Fixed timetable: ${label(tr, b)} ${stateClause(tr, b, c)}, so ${k} ready ${plural(k, 'instruction')} behind it must hold.` });
+      out.push({
+        sev: iss === 0 ? 3 : 2,
+        text: tr.SPLIT
+          ? `Split lines: ${label(tr, b)} ${stateClause(tr, b, c)}, holding up the ${UNIT_LINE[tr.instrs[b].unit]}. ${k} ready ${plural(k, 'instruction')} must hold behind a stuck one in ${plural(k, 'its', 'their')} line.`
+          : `Fixed timetable: ${label(tr, b)} ${stateClause(tr, b, c)}, so ${k} ready ${plural(k, 'instruction')} behind it must hold.`,
+      });
     }
   }
   if (cyc.nName[c] > 0) {
@@ -614,10 +628,15 @@ export function cycleStatus(tr, c) {
       const r = regName(tr.instrs[xid].dst);
       const waw = tr.instrs[ref].dst === tr.instrs[xid].dst;
       // On a fixed-order network a younger vehicle's clash only matters
-      // when it is the one at the front of the line.
-      const leads = tr.OOO || xid === oldestWaiting(tr, c);
+      // when it is the one at the front of the line (of its own line when
+      // the lines are split).
+      const leads = tr.OOO || xid === oldestWaiting(tr, c, tr.SPLIT ? tr.instrs[xid].unit : undefined);
       out.push({ sev: !leads ? 1 : iss === 0 ? 3 : 2, text: `Register clash: ${label(tr, xid)} is ready, but it writes ${r} and ${label(tr, ref)} ${waw ? `has yet to write ${r} itself` : `has yet to read the value in ${r}`}. Without renaming, ${k} ${plural(k, 'instruction')} ${plural(k, 'waits', 'wait')} for a register name.` });
     }
+  }
+  if (cyc.board[c] === C.SCHED) {
+    const free = tr.WIN - cyc.rob[c];
+    out.push({ sev: iss === 0 ? 2 : 1, text: `The departure board is full: all ${tr.SCHED} slots list vehicles waiting to depart, so the entrance holds new ones${free > 0 ? ` although ${free} ${plural(free, 'berth is', 'berths are')} free` : ''}.` });
   }
   if (cyc.board[c] === C.REGS) {
     out.push({ sev: iss === 0 ? 3 : 1, text: `All ${tr.RENAME} rename registers are taken by results still aboard, so the entrance holds new vehicles until older ones exit and free one.` });
@@ -671,7 +690,7 @@ export function instrStory(tr, id) {
   const i = tr.issueC[id];
   const dn = tr.doneC[id];
   const r = tr.retireC[id];
-  const totals = { entrance: 0, hold: 0, holdRegs: 0, dep: 0, mem: 0, unit: 0, order: 0, name: 0, width: 0, ride: 0, trip: 0, exitWait: 0 };
+  const totals = { entrance: 0, hold: 0, holdRegs: 0, holdSched: 0, dep: 0, mem: 0, unit: 0, order: 0, name: 0, width: 0, ride: 0, trip: 0, exitWait: 0 };
 
   ev.push({ c: f, kind: 'fetch', text: `Entered the network at the entrance, lane ${tr.feLane[id] + 1}.` });
   totals.entrance = Math.min(d, f + tr.FE) - f;
@@ -679,18 +698,20 @@ export function instrStory(tr, id) {
   const HOLD_TEXT = {
     [C.WINDOW]: 'Held at the end of the entrance: the platform was full.',
     [C.REGS]: `Held at the end of the entrance: all ${tr.RENAME} rename registers were taken.`,
+    [C.SCHED]: `Held at the end of the entrance: all ${tr.SCHED} slots on the departure board were taken.`,
     0: 'Waited at the end of the entrance while the vehicles ahead of it boarded.',
   };
   for (let c = f + tr.FE; c < d; ) {
     const why = tr.cyc.board[c] || 0;
     let e = c + 1;
     while (e < d && (tr.cyc.board[e] || 0) === why) e++;
-    ev.push({ c, c2: e, kind: 'hold', code: why === C.REGS ? C.REGS : C.WINDOW, text: HOLD_TEXT[why] });
+    ev.push({ c, c2: e, kind: 'hold', code: why === C.REGS || why === C.SCHED ? why : C.WINDOW, text: HOLD_TEXT[why] });
     if (why === C.REGS) totals.holdRegs += e - c;
+    else if (why === C.SCHED) totals.holdSched += e - c;
     else totals.hold += e - c;
     c = e;
   }
-  ev.push({ c: d, kind: 'board', text: `Boarded berth ${tr.slot[id] + 1} of ${tr.WIN}.${ins.dst >= 0 && tr.RENAME ? ` Its result will go to ${regName(ins.dst)}; renaming gives it a fresh register for that.` : ''}` });
+  ev.push({ c: d, kind: 'board', text: `${tr.SPLIT ? `Boarded and joined the ${UNIT_LINE[ins.unit]}.` : `Boarded berth ${tr.slot[id] + 1} of ${tr.WIN}.`}${ins.dst >= 0 && tr.RENAME ? ` Its result will go to ${regName(ins.dst)}; renaming gives it a fresh register for that.` : ''}` });
   for (const [from, to, code, ref] of tr.waits[id]) {
     ev.push({ c: from, c2: to, kind: 'wait', code, ref, text: capitalize(waitClause(tr, id, code, ref)) + '.' });
     const n = to - from;
@@ -890,7 +911,7 @@ export function compareNarrative(A, B) {
         ? `Renaming changed nothing here: ${A.name} never had to wait to reuse a register name.`
         : gained
           ? `Renaming gave every result a fresh register, so nothing waited to reuse a register name. Without it, ${A.name}’s instructions spent ${fmtInt(sa.nameWait)} instruction-${plural(sa.nameWait, 'cycle')} waiting for older ones to finish with their register.`
-          : `Renaming removed ${fmtInt(sa.nameWait)} instruction-${plural(sa.nameWait, 'cycle')} of waiting for register names, but ${B.cfg.ooo ? 'other waits took their place' : 'on a fixed-order network those instructions were held behind older ones anyway'}, so it saved no time.`);
+          : `Renaming removed ${fmtInt(sa.nameWait)} instruction-${plural(sa.nameWait, 'cycle')} of waiting for register names, but ${B.cfg.route === 'dynamic' ? 'other waits took their place' : `on a ${B.cfg.route === 'split' ? 'split-lines' : 'fixed-order'} network those instructions were held behind older ones anyway`}, so it saved no time.`);
     } else if (A.cfg.renameRegs && !B.cfg.renameRegs) {
       add(Math.max(0.15, slotPct(sb, C.NAME)), sb.nameWait
         ? `Without renaming each register holds one value at a time, so instructions spent ${fmtInt(sb.nameWait)} instruction-${plural(sb.nameWait, 'cycle')} waiting for older ones to finish with a register name they reuse (${pct(slotPct(sb, C.NAME))} of departure capacity). Loops suffer most: every pass reuses the same names.`
@@ -899,15 +920,28 @@ export function compareNarrative(A, B) {
       add(0.1 + Math.abs(sa.regsHeld - sb.regsHeld) / Math.max(1, sa.cycles), `With ${B.cfg.renameRegs} rename registers, boarding stopped for want of one in ${fmtInt(sb.regsHeld)} ${plural(sb.regsHeld, 'cycle')} (was ${fmtInt(sa.regsHeld)} with ${A.cfg.renameRegs}). At most ${sb.writersPeak} were in use at once.`);
     }
   }
-  if (keys.has('ooo')) {
-    if (B.cfg.ooo) {
-      const held = sa.orderWait;
+  if (keys.has('route')) {
+    const from = ROUTE_BY_ID[A.cfg.route].label.toLowerCase();
+    const held = (s) => `${fmtInt(s.orderWait)} instruction-${plural(s.orderWait, 'cycle')}`;
+    if (B.cfg.route === 'dynamic') {
       if (sb.overtakes < 3) add(0.3, `Dynamic routing found almost nothing to reorder: ${sb.overtakes === 0 ? 'no instruction' : `only ${sb.overtakes} ${plural(sb.overtakes, 'instruction')}`} could depart ahead of an older one, because each one needs the result before it.`);
-      else add(Math.max(0.3, slotPct(sa, C.ORDER)), `With dynamic routing, ${fmtInt(sb.overtakes)} instructions departed ahead of an older one that was stuck. Under the fixed timetable, ready instructions spent ${fmtInt(held)} instruction-${plural(held, 'cycle')} held in line.`);
-      if (sb.gatePeak > sa.gatePeak) add(0.2, `Up to ${sb.gatePeak} cache misses were in flight at once, versus ${sa.gatePeak} with fixed order.`);
+      else add(Math.max(0.3, slotPct(sa, C.ORDER)), `With dynamic routing, ${fmtInt(sb.overtakes)} instructions departed ahead of an older one that was stuck. With ${from}, ready instructions spent ${held(sa)} held in line.`);
+      if (sb.gatePeak > sa.gatePeak) add(0.2, `Up to ${sb.gatePeak} cache misses were in flight at once, versus ${sa.gatePeak} with ${from}.`);
+    } else if (B.cfg.route === 'split') {
+      if (A.cfg.route === 'fixed') {
+        add(Math.max(0.3, slotPct(sa, C.ORDER) - slotPct(sb, C.ORDER)), sb.overtakes < 3
+          ? `Splitting the lines changed little: almost every stuck instruction was holding up work bound for the same kind of station.`
+          : `With split lines, ${fmtInt(sb.overtakes)} instructions departed ahead of an older one bound for a different kind of station. Ready instructions spent ${held(sb)} held in line, down from ${held(sa)} under fixed order.`);
+      } else {
+        add(Math.max(0.3, slotPct(sb, C.ORDER)), `With split lines, ready instructions spent ${held(sb)} held behind a stuck one bound for the same kind of station. Dynamic routing would have let them go.`);
+      }
     } else {
-      add(Math.max(0.3, slotPct(sb, C.ORDER)), `Without dynamic routing, ready instructions spent ${fmtInt(sb.orderWait)} instruction-${plural(sb.orderWait, 'cycle')} held behind stuck ones.`);
+      add(Math.max(0.3, slotPct(sb, C.ORDER)), `With fixed order, ready instructions spent ${held(sb)} held behind stuck ones${A.cfg.route === 'split' ? `, versus ${held(sa)} with split lines` : ''}.`);
     }
+  }
+  if (keys.has('sched')) {
+    const size = (t) => (t.SCHED >= t.WIN ? `a board as big as the platform (${t.SCHED})` : `a ${t.SCHED}-slot board`);
+    add(0.1 + Math.abs(sa.schedHeld - sb.schedHeld) / Math.max(1, sa.cycles), `With ${size(tb)} instead of ${size(ta)}, the dispatcher could ${tb.SCHED > ta.SCHED ? 'look further ahead for ready work' : 'see fewer waiting vehicles'}. Boarding stopped for a full board in ${fmtInt(sb.schedHeld)} ${plural(sb.schedHeld, 'cycle')} (was ${fmtInt(sa.schedHeld)}).`);
   }
   for (const [key, unit] of [['alu', 'alu'], ['fpu', 'fpu'], ['lsu', 'lsu']]) {
     if (!keys.has(key)) continue;
