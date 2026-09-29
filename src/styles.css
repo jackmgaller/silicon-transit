@@ -2036,6 +2036,24 @@ select {
   background: var(--gloss), linear-gradient(180deg, var(--white), var(--paper-2));
 }
 
+.btn-sound svg {
+  width: 18px;
+  height: 18px;
+}
+
+.btn-sound .i-sound-off,
+.btn-sound[aria-pressed="false"] .i-sound-on {
+  display: none;
+}
+
+.btn-sound[aria-pressed="false"] .i-sound-off {
+  display: block;
+}
+
+.btn-sound[aria-pressed="false"] {
+  color: var(--ink-3);
+}
+
 /* ------------------------------------------------------------- Tooltip */
 
 .tooltip {
