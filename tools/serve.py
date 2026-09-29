@@ -35,7 +35,13 @@ class NoCache(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
 
 
+class Server(http.server.ThreadingHTTPServer):
+    # The page loads ~18 ES modules at once; the default backlog of 5 can
+    # overflow and reset connections, leaving the app half-loaded.
+    request_queue_size = 64
+
+
 if __name__ == "__main__":
     os.chdir(ROOT)
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 4912
-    http.server.ThreadingHTTPServer(("127.0.0.1", port), NoCache).serve_forever()
+    Server(("127.0.0.1", port), NoCache).serve_forever()
