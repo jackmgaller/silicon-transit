@@ -5,6 +5,8 @@ transit network. Generate a workload, configure fictional processors, and
 watch the same work run on each one, then read a service report that explains
 why one network was faster.
 
+This project was entirely vibe coded.
+
 - **Vehicles** are instructions (color = kind). SIMD work rides as coupled
   cars, one lane per operation.
 - **Entrance** is fetch/decode, **platform** is the instruction window
