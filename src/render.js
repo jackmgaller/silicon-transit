@@ -574,7 +574,7 @@ export class NetworkView {
     this.label('CACHE LINES', Y.x0 + 10, Y.y0 + 10, { size: 8, weight: 800, color: PAL.ink, spacing: 1 });
     const yardTitleW = this.textWidth('CACHE LINES', 8, 800, 1);
     this.label('8 words each', Y.x0 + 10 + yardTitleW + 6, Y.y0 + 10, { size: 7.5, weight: 500, color: PAL.ink3 });
-    for (const lb of yg.labels) this.label(lb.name.toUpperCase(), Y.x0 + 9, lb.y, { size: 6.5, weight: 800, color: PAL.ink3, spacing: 0.3 });
+    for (const lb of yg.labels) this.label(lb.name, lb.x, lb.y, { size: yg.inline ? 5.5 : 6.5, weight: 800, color: PAL.ink3, spacing: 0.3 });
     if (!yg.cars.length) this.label('this timetable never touches memory', (Y.x0 + Y.x1) / 2, (Y.y0 + Y.y1) / 2, { size: 8, weight: 600, color: PAL.ink3, align: 'center' });
     // Legend: seat colors, then where a line is.
     let lx = Y.x0 + 10;
@@ -1132,46 +1132,73 @@ export class NetworkView {
 
   // Car positions: each region of memory starts a row, labeled in the gutter;
   // contiguous lines couple into trains. Cars shrink until everything fits.
+  // With many regions and lines, regions share rows instead, each opened by
+  // a short inline label.
   yardLayout() {
     if (this.yardGeom) return this.yardGeom;
     const Y = this.L.yard;
     const model = yardModel(this.tr);
-    const gutter = 32;
-    const x0 = Y.x0 + 8 + gutter;
-    const x1 = Y.x1 - 8;
     const y0 = Y.y0 + 20;
     const y1 = Y.y1 - 16;
-    let geom = null;
-    for (let sw = 3.4; sw >= 0.4 && !geom; sw -= 0.05) {
+    const tryLayout = (sw, inline) => {
+      const x0 = Y.x0 + 8 + (inline ? 0 : 32);
+      const x1 = Y.x1 - 8;
       const w = 8 * sw + 2;
-      const h = Math.max(2.6, Math.min(8.5, sw * 2.5));
-      const rowGap = Math.max(1.6, h * 0.42);
+      const h = Math.max(2.4, Math.min(8.5, sw * 2.5));
+      const rowGap = Math.max(1.4, h * 0.42);
+      // Inline rows must be tall enough for their small labels.
+      const rowH = inline ? Math.max(h, 4.6) : h;
       const cars = [];
       const labels = [];
       let y = y0;
+      let x = x0;
       for (const reg of model.regions) {
-        let x = x0;
         const top = y;
+        if (inline) {
+          // Short tag, then the cars; wrap if the tag and a car won't fit.
+          const tag = reg.key === 'hot' ? 'HOT' : reg.key === 'heap' ? 'HEAP' : 'A' + reg.short.split(' ')[1];
+          const tw = this.textWidth(tag, 5.5, 800, 0.3) + 2.5;
+          if (x > x0) x += 5;
+          if (x + tw + w > x1) {
+            y += rowH + rowGap;
+            x = x0;
+          }
+          labels.push({ name: tag, x, y: y + h / 2 });
+          x += tw;
+        } else {
+          x = x0;
+          labels.push({ name: reg.short.toUpperCase(), x: Y.x0 + 9, y: top + h / 2 });
+        }
         let prev = -2;
+        let first = true;
         for (const m of reg.lines) {
-          const join = m.line === prev + 1;
-          let gap = x > x0 ? (join ? 1.3 : Math.max(2.4, sw * 1.1)) : 0;
+          const join = m.line === prev + 1 && !first;
+          let gap = first ? 0 : join ? Math.min(1.3, sw * 0.6) : Math.max(1, sw * 1.1);
           if (x + gap + w > x1) {
-            y += h + rowGap;
+            y += rowH + rowGap;
             x = x0;
             gap = 0;
           }
           cars.push({ m, x: x + gap, y, w, h, sw, join: join && gap > 0 });
           x += gap + w;
           prev = m.line;
+          first = false;
         }
-        labels.push({ name: reg.short, y: top + h / 2 });
-        y = Math.max(y + h + rowGap + 2.5, top + 10);
+        if (!inline) y = Math.max(y + h + rowGap + 2.5, top + 10);
       }
-      if (y - rowGap - 2.5 <= y1 || sw < 0.45) geom = { cars, labels };
+      const bottom = inline ? y + rowH : y - rowGap - 2.5;
+      return { cars, labels, inline, fits: bottom <= y1 };
+    };
+    let geom = null;
+    for (const inline of [false, true]) {
+      for (let sw = 3.4; sw >= (inline ? 0.2 : 0.9) && !geom; sw -= 0.05) {
+        const g = tryLayout(sw, inline);
+        if (g.fits) geom = g;
+      }
+      if (geom) break;
     }
-    this.yardGeom = geom;
-    return geom;
+    this.yardGeom = geom || tryLayout(0.2, true);
+    return this.yardGeom;
   }
 
   drawYard(c, T, items) {

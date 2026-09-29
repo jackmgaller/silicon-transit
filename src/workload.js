@@ -191,8 +191,15 @@ export function generateWorkload(params) {
   // Arrays are read in order (8-byte steps, eight elements per line) or,
   // with less spatial locality, a whole line apart (like walking down a
   // column of a matrix).
+  // A program works on a handful of arrays; longer timetables run more
+  // loops over the same ones rather than inventing new ones.
+  const MAX_ARRAYS = 6;
   function pickArray(avoid) {
     const free = arrays.filter((a) => !avoid.has(a));
+    if (arrays.length >= MAX_ARRAYS) {
+      const pool = free.length ? free : arrays;
+      return pool[rV.int(0, pool.length - 1)];
+    }
     if (free.length && rV.next() < 0.5) return free[rV.int(0, free.length - 1)];
     const a = {
       id: arrays.length,
