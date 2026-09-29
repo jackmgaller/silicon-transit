@@ -5,7 +5,7 @@ transit network. Generate a workload, configure fictional processors, and
 watch the same work run on each one, then read a service report that explains
 why one network was faster.
 
-![Silicon Transit: the workload planner beside the Local and Express networks drawn as transit maps](media/screenshot.png)
+![Silicon Transit: the workload planner beside the Local and Express networks, drawn as transit maps with register boards and cache-line yards](media/screenshot.png)
 
 [Watch Local and Express run the same program (MP4, 60 fps)](media/local-vs-express.mp4)
 
