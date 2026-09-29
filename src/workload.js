@@ -16,37 +16,37 @@ export const PRESETS = [
     id: 'independent',
     name: 'Independent Arithmetic',
     blurb: 'Plenty of unrelated math. Wide machines with many stations pull ahead.',
-    params: { size: 220, mix: { int: 55, fp: 40, mem: 5, branch: 0 }, dependency: 0.06, locality: 0.92, vector: 0, predictability: 0.96 },
+    params: { size: 220, mix: { int: 55, fp: 40, mem: 5, branch: 0 }, dependency: 0.06, spatial: 0.9, temporal: 0.92, vector: 0, predictability: 0.96 },
   },
   {
     id: 'chain',
     name: 'Dependency Chain',
     blurb: 'Every step needs the one before it. Extra hardware has nothing to do.',
-    params: { size: 150, mix: { int: 50, fp: 45, mem: 5, branch: 0 }, dependency: 1, locality: 0.92, vector: 0, predictability: 0.96 },
+    params: { size: 150, mix: { int: 50, fp: 45, mem: 5, branch: 0 }, dependency: 1, spatial: 0.9, temporal: 0.92, vector: 0, predictability: 0.96 },
   },
   {
     id: 'array',
     name: 'Array Processing',
     blurb: 'Loops that stream through arrays. Caches, overlap and SIMD all matter.',
-    params: { size: 220, mix: { int: 15, fp: 35, mem: 45, branch: 5 }, dependency: 0.3, locality: 0.7, vector: 0.55, predictability: 0.94 },
+    params: { size: 220, mix: { int: 15, fp: 35, mem: 45, branch: 5 }, dependency: 0.3, spatial: 0.85, temporal: 0.6, vector: 0.55, predictability: 0.94 },
   },
   {
     id: 'pointer',
     name: 'Pointer Chasing',
     blurb: 'Each load needs the address the previous load returned. Memory latency rules.',
-    params: { size: 110, mix: { int: 25, fp: 0, mem: 70, branch: 5 }, dependency: 1, locality: 0.08, vector: 0, predictability: 0.9 },
+    params: { size: 110, mix: { int: 25, fp: 0, mem: 70, branch: 5 }, dependency: 1, spatial: 0.05, temporal: 0.08, vector: 0, predictability: 0.9 },
   },
   {
     id: 'branchy',
     name: 'Branch Heavy',
     blurb: 'Decisions everywhere, and a third of them go the unexpected way.',
-    params: { size: 200, mix: { int: 50, fp: 5, mem: 15, branch: 30 }, dependency: 0.35, locality: 0.85, vector: 0, predictability: 0.7 },
+    params: { size: 200, mix: { int: 50, fp: 5, mem: 15, branch: 30 }, dependency: 0.35, spatial: 0.8, temporal: 0.85, vector: 0, predictability: 0.7 },
   },
   {
     id: 'simd',
     name: 'SIMD Friendly',
     blurb: 'The same math on long rows of data. Wide SIMD lanes carry it in bulk.',
-    params: { size: 240, mix: { int: 5, fp: 55, mem: 40, branch: 0 }, dependency: 0.2, locality: 0.85, vector: 0.95, predictability: 0.96 },
+    params: { size: 240, mix: { int: 5, fp: 55, mem: 40, branch: 0 }, dependency: 0.2, spatial: 0.95, temporal: 0.75, vector: 0.95, predictability: 0.96 },
   },
 ];
 
@@ -67,11 +67,14 @@ export function normalizeWorkloadParams(p) {
     branch: Math.max(0, +p.mix?.branch || 0),
   };
   if (mix.int + mix.fp + mix.mem + mix.branch <= 0) mix.int = 1;
+  // Older timetables had one locality knob; it sets both kinds.
+  const loc = p.locality == null ? 0.5 : +p.locality;
   return {
     size: clamp(Math.round(+p.size || 200), 24, 1000),
     mix,
     dependency: clamp(+p.dependency || 0, 0, 1),
-    locality: clamp(+p.locality || 0, 0, 1),
+    spatial: clamp(p.spatial == null ? loc : +p.spatial || 0, 0, 1),
+    temporal: clamp(p.temporal == null ? loc : +p.temporal || 0, 0, 1),
     vector: clamp(+p.vector || 0, 0, 1),
     predictability: clamp(p.predictability == null ? 0.95 : +p.predictability, 0.5, 1),
     warm: p.warm !== false,
@@ -117,11 +120,19 @@ export function generateWorkload(params) {
   const rT = makeRng(P.seed, 'value-type');
   const rW = makeRng(P.seed, 'warm');
 
-  const loc = P.locality;
-  const heapBytes = Math.max(4096, 64 * Math.round(Math.pow(2, 22 - 10 * loc) / 64));
-  const arrayBytes = Math.max(4096, 64 * Math.round(Math.pow(2, 23 - 11 * loc) / 64));
-  const pHot = 0.5 * loc * loc;
-  const pSeq = 0.45 * loc;
+  // Temporal locality: how soon data is used again. It shrinks the working
+  // set, sends more accesses to a small hot region and re-reads recently
+  // used words. Spatial locality: how often the next access lands next door.
+  // It makes scalar accesses walk to the neighboring word and arrays run in
+  // order rather than a line apart.
+  const S = P.spatial;
+  const T = P.temporal;
+  const heapBytes = Math.max(4096, 64 * Math.round(Math.pow(2, 22 - 10 * T) / 64));
+  const arrayBytes = Math.max(4096, 64 * Math.round(Math.pow(2, 23 - 11 * T) / 64));
+  const pReuse = 0.4 * T;
+  const pHot = 0.5 * T * T;
+  const pSeq = 0.7 * S;
+  const pRevisit = T;
 
   const mixSum = P.mix.int + P.mix.fp + P.mix.mem + P.mix.branch;
   const share = {
@@ -140,7 +151,7 @@ export function generateWorkload(params) {
   const prodAll = [];
   const prodI = [];
   const prodF = [];
-  const heap = { off: rA.int(0, heapBytes / 8 - 1) * 8 };
+  const heap = { off: rA.int(0, heapBytes / 8 - 1) * 8, recent: [] };
 
   const vecTarget = N * P.vector;
   let vecMade = 0;
@@ -153,15 +164,23 @@ export function generateWorkload(params) {
     return classes[rng.weighted(w)];
   }
 
+  // One scalar access: re-read a word used a moment ago, touch the small hot
+  // region, walk on to the next word, or land anywhere in the heap.
   function scalarAddr(rng, st) {
-    const u = rng.next();
-    if (u < pHot) return HOT_BASE + rng.int(0, HOT_BYTES / 8 - 1) * 8;
-    if (u < pHot + pSeq) {
-      st.off = (st.off + 8) % heapBytes;
-      return HEAP_BASE + st.off;
+    let addr;
+    if (st.recent.length && rng.next() < pReuse) {
+      const back = Math.min(st.recent.length - 1, rng.geometric(0.45));
+      addr = st.recent[st.recent.length - 1 - back];
+    } else if (rng.next() < pHot) {
+      addr = HOT_BASE + rng.int(0, HOT_BYTES / 8 - 1) * 8;
+    } else {
+      if (rng.next() < pSeq) st.off = (st.off + 8) % heapBytes;
+      else st.off = rng.int(0, heapBytes / 8 - 1) * 8;
+      addr = HEAP_BASE + st.off;
     }
-    st.off = rng.int(0, heapBytes / 8 - 1) * 8;
-    return HEAP_BASE + st.off;
+    st.recent.push(addr);
+    if (st.recent.length > 12) st.recent.shift();
+    return addr;
   }
 
   function addProducer(i, vt) {
@@ -169,16 +188,22 @@ export function generateWorkload(params) {
     (vt === 'f' ? prodF : prodI).push(i);
   }
 
-  function pickArray() {
-    if (arrays.length && rV.next() < loc * 0.7) return arrays[rV.int(0, arrays.length - 1)];
+  // Arrays are read in order (8-byte steps, eight elements per line) or,
+  // with less spatial locality, a whole line apart (like walking down a
+  // column of a matrix).
+  function pickArray(avoid) {
+    const free = arrays.filter((a) => !avoid.has(a));
+    if (free.length && rV.next() < 0.5) return free[rV.int(0, free.length - 1)];
     const a = {
       id: arrays.length,
       base: ARRAY_BASE + arrays.length * ARRAY_STRIDE,
       bytes: arrayBytes,
+      stride: rV.next() < S ? 8 : 64,
       cursor: 0,
       start: 0,
+      segs: [],
     };
-    a.cursor = a.start = rV.int(0, arrayBytes / 8 - 1);
+    a.cursor = a.start = rV.int(0, arrayBytes / a.stride - 1);
     arrays.push(a);
     return a;
   }
@@ -229,7 +254,13 @@ export function generateWorkload(params) {
     const nLoad = nMem - nStore;
     const computes = classes.filter((c) => c !== 'mem');
     const tpl = [];
-    for (let k = 0; k < nLoad; k++) tpl.push({ op: 'load', cls: 'mem', deps: [], arr: pickArray() });
+    // Each load in the body reads a different array.
+    const loaded = new Set();
+    for (let k = 0; k < nLoad; k++) {
+      const arr = pickArray(loaded);
+      loaded.add(arr);
+      tpl.push({ op: 'load', cls: 'mem', deps: [], arr });
+    }
     for (const cc of computes) {
       const op = pickWeighted(rV, VEC_OPS[cc]);
       const deps = [];
@@ -239,7 +270,7 @@ export function generateWorkload(params) {
       }
       tpl.push({ op, cls: cc, deps, arr: null });
     }
-    for (let k = 0; k < nStore; k++) tpl.push({ op: 'store', cls: 'mem', deps: tpl.length ? [tpl.length - 1] : [], arr: pickArray() });
+    for (let k = 0; k < nStore; k++) tpl.push({ op: 'store', cls: 'mem', deps: tpl.length ? [tpl.length - 1] : [], arr: pickArray(new Set()) });
 
     const per = tpl.length;
     const L = Math.min(rV.int(6, 20), Math.floor(maxOps / per));
@@ -247,6 +278,17 @@ export function generateWorkload(params) {
     const loopId = loops.length;
     const start = ops.length;
     const loadVt = computes.includes('fp') ? 'f' : 'i';
+    // Each array either carries on from where it stopped or, with temporal
+    // locality, goes back over a stretch an earlier loop already read.
+    const from = new Map();
+    for (const a of new Set(tpl.filter((t) => t.arr).map((t) => t.arr))) {
+      if (a.segs.length && rV.next() < pRevisit) from.set(a, a.segs[rV.int(0, a.segs.length - 1)]);
+      else {
+        from.set(a, a.cursor);
+        a.segs.push(a.cursor);
+        a.cursor += L;
+      }
+    }
     for (let e = 0; e < L; e++) {
       const base = ops.length;
       for (let s = 0; s < per; s++) {
@@ -263,7 +305,7 @@ export function generateWorkload(params) {
           vec: { loop: loopId, elem: e, slot: s },
           vt: null,
         };
-        if (t.arr) o.addr = t.arr.base + (((t.arr.cursor + e) * 8) % t.arr.bytes);
+        if (t.arr) o.addr = t.arr.base + (((from.get(t.arr) + e) * t.arr.stride) % t.arr.bytes);
         if (def.type === 'load') o.vt = loadVt;
         else if (def.cls === 'fp') o.vt = 'f';
         else if (def.cls === 'int') o.vt = 'i';
@@ -272,7 +314,6 @@ export function generateWorkload(params) {
         if (o.vt) addProducer(o.i, o.vt);
       }
     }
-    for (const a of new Set(tpl.filter((t) => t.arr).map((t) => t.arr))) a.cursor += L;
     loops.push({ id: loopId, start, elems: L, slots: per, ops: tpl.map((t) => t.op) });
     vecMade += L * per;
     return true;
@@ -300,7 +341,7 @@ export function generateWorkload(params) {
     const heapLines = heapBytes / 64;
     const sweep = heapLines <= 32768 ? heapLines : 0;
     const H = Math.min(60000, Math.max(1024, Math.round(3 * heapLines)));
-    const st = { off: rW.int(0, heapBytes / 8 - 1) * 8 };
+    const st = { off: rW.int(0, heapBytes / 8 - 1) * 8, recent: [] };
     const hs = new Uint32Array(sweep + H + HOT_BYTES / 64);
     let k = 0;
     for (let j = 0; j < sweep; j++) hs[k++] = (HEAP_BASE >>> 6) + j;
@@ -313,13 +354,28 @@ export function generateWorkload(params) {
     for (const a of arrays) {
       const lines = a.bytes / 64;
       const K = Math.min(lines, per);
-      const startLine = Math.floor((a.start * 8) / 64);
+      const startLine = Math.floor((a.start * a.stride) / 64);
       const s = new Uint32Array(K);
       for (let j = 0; j < K; j++) s[j] = (a.base >>> 6) + ((((startLine - K + j) % lines) + lines) % lines);
       streams.push(s);
     }
   }
   const warmLines = streams.length ? mergeStreams(streams) : new Uint32Array(0);
+
+  // The program's own locality, whatever the caches: does each access, in
+  // program order, reuse a word used before, land on a line used before,
+  // or touch a new line?
+  const seenWord = new Set();
+  const seenLine = new Set();
+  const locality = { reuse: 0, near: 0, fresh: 0 };
+  for (const o of ops) {
+    if (o.addr == null) continue;
+    if (seenWord.has(o.addr >>> 3)) locality.reuse++;
+    else if (seenLine.has(o.addr >>> 6)) locality.near++;
+    else locality.fresh++;
+    seenWord.add(o.addr >>> 3);
+    seenLine.add(o.addr >>> 6);
+  }
 
   const counts = { int: 0, fp: 0, load: 0, store: 0, branch: 0 };
   let mispredicts = 0;
@@ -332,7 +388,7 @@ export function generateWorkload(params) {
     params: P,
     ops,
     loops,
-    arrays: arrays.map((a) => ({ id: a.id, base: a.base, bytes: a.bytes })),
+    arrays: arrays.map((a) => ({ id: a.id, base: a.base, bytes: a.bytes, stride: a.stride })),
     warmLines,
     summary: {
       N: ops.length,
@@ -340,10 +396,13 @@ export function generateWorkload(params) {
       vecOps: vecMade,
       loops: loops.length,
       arrays: arrays.length,
+      inOrderArrays: arrays.filter((a) => a.stride === 8).length,
       heapBytes,
       arrayBytes,
       scalarMem,
       mispredicts,
+      locality,
+      lines: seenLine.size,
     },
   };
 }

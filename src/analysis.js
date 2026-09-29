@@ -1,7 +1,8 @@
 // Metrics and explanations, all computed from a simulation trace.
 
-import { C, CODE_INFO, SLOT_CODES, LVL, OPS, UNIT_LABEL, UNIT_PLURAL, UNIT_NOUN } from './isa.js';
+import { C, CODE_INFO, SLOT_CODES, LVL, OPS, UNIT_LABEL, UNIT_PLURAL, UNIT_NOUN, LOC, NREG, regName, hex } from './isa.js';
 import { describeDiff, formatParam } from './machine.js';
+import { HOT_BASE, HOT_BYTES, HEAP_BASE, ARRAY_BASE, ARRAY_STRIDE } from './workload.js';
 
 export const fmtInt = (n) => Math.round(n).toLocaleString('en-US');
 export const pct = (x, d = 0) => (x == null ? '—' : (x * 100).toFixed(d) + '%');
@@ -76,6 +77,188 @@ export function retireBlocker(tr, id) {
 }
 
 // ---------------------------------------------------------------------------
+// Registers.
+
+// Assembly-like text for one instruction, with its register names.
+export function instrText(tr, id) {
+  const ins = tr.instrs[id];
+  const v = ins.vector ? 'v' : '';
+  const lanes = ins.vector ? ` ×${ins.lanes}` : '';
+  const srcs = ins.srcRegs.map(regName);
+  if (ins.type === 'load') return `${v}load ${regName(ins.dst)} ← [${srcs.length ? srcs[0] : hex(ins.addr)}]${lanes}`;
+  if (ins.type === 'store') {
+    // The last source is the value stored; an earlier one supplies the address.
+    const where = srcs.length > 1 ? srcs[0] : hex(ins.addr);
+    return `${v}store [${where}]${srcs.length ? ' ← ' + srcs[srcs.length - 1] : ''}${lanes}`;
+  }
+  if (ins.type === 'branch') return `br${srcs.length ? ' if ' + srcs[0] : ''}`;
+  return `${v}${OPS[ins.op].short} ${regName(ins.dst)}${srcs.length ? ' ← ' + srcs.join(', ') : ''}${lanes}`;
+}
+
+// Register r at cycle c: the writers whose values are still aboard, oldest
+// first, ending with the one a newly boarding reader would get.
+export function regVersions(tr, r, c) {
+  const ws = tr.regWriters[r] || [];
+  let lo = 0;
+  let hi = ws.length - 1;
+  let last = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const d = tr.dispC[ws[mid]];
+    if (d >= 0 && d <= c) {
+      last = mid;
+      lo = mid + 1;
+    } else hi = mid - 1;
+  }
+  if (last < 0) return { latest: -1, aboard: [] };
+  let first = last;
+  while (first > 0 && tr.retireC[ws[first - 1]] > c) first--;
+  const aboard = [];
+  for (let k = first; k <= last; k++) if (tr.retireC[ws[k]] > c) aboard.push(ws[k]);
+  return { latest: ws[last], aboard };
+}
+
+// Rename registers in use at cycle c (register writers aboard).
+export const writersAt = (tr, c) => (c < 0 ? 0 : c < tr.cycles ? tr.cyc.writers[c] : 0);
+
+// ---------------------------------------------------------------------------
+// Caches and locality.
+
+// Display time of a recorded access: a load's lookup finishes L1LAT cycles
+// after it departs; a store writes as it exits.
+export const accessTime = (tr, e) => (e.store ? e.c : e.c + tr.L1LAT);
+
+// Which part of memory a line belongs to.
+export function regionOf(line) {
+  const a = line * 64;
+  if (a >= HOT_BASE && a < HOT_BASE + HOT_BYTES) return { key: 'hot', order: 0, name: 'Hot data', short: 'Hot' };
+  if (a >= HEAP_BASE && a < ARRAY_BASE) return { key: 'heap', order: 1, name: 'Heap', short: 'Heap' };
+  const k = Math.floor((a - ARRAY_BASE) / ARRAY_STRIDE);
+  return { key: 'array' + k, order: 2 + k, name: `Array ${k + 1}`, short: `Array ${k + 1}` };
+}
+
+// Every line this program touches, with its accesses and the spans it spent
+// in L1 and L2, for drawing the cache yard. Cached on the trace.
+export function yardModel(tr) {
+  if (tr.yard) return tr.yard;
+  const lines = [...tr.touched].sort((a, b) => a - b);
+  const byLine = new Map();
+  const model = [];
+  for (const ln of lines) {
+    const reg = regionOf(ln);
+    const m = { line: ln, region: reg, acc: [], l1: [], l2: [] };
+    if (tr.initL1.has(ln)) m.l1.push([-Infinity, Infinity, -Infinity]);
+    if (tr.initL2.has(ln)) m.l2.push([-Infinity, Infinity]);
+    byLine.set(ln, m);
+    model.push(m);
+  }
+  const close = (list, t) => {
+    const last = list[list.length - 1];
+    if (last && last[1] === Infinity) last[1] = Math.max(last[0], t);
+  };
+  for (const e of tr.events) {
+    const t = accessTime(tr, e);
+    if (e.ev1 >= 0 && byLine.has(e.ev1)) close(byLine.get(e.ev1).l1, t);
+    if (e.ev2 >= 0 && byLine.has(e.ev2)) close(byLine.get(e.ev2).l2, t);
+    const m = byLine.get(e.line);
+    if (e.cls >= LOC.COLD) {
+      close(m.l1, t);
+      m.l1.push([t, Infinity, Math.max(t, e.fill)]);
+    }
+    if (e.in2) {
+      close(m.l2, t);
+      m.l2.push([t, Infinity]);
+    }
+    m.acc.push({ t, e });
+  }
+  const regions = [];
+  for (const m of model) {
+    let r = regions[regions.length - 1];
+    if (!r || r.key !== m.region.key) {
+      r = { key: m.region.key, name: m.region.name, short: m.region.short, order: m.region.order, lines: [] };
+      regions.push(r);
+    }
+    r.lines.push(m);
+  }
+  regions.sort((a, b) => a.order - b.order);
+  tr.yard = { lines: model, byLine, regions };
+  return tr.yard;
+}
+
+// Where a yard line is at display time t: 'l1', 'arriving', 'l2' or 'mem'.
+export function lineWhere(m, t) {
+  for (let k = m.l1.length - 1; k >= 0; k--) {
+    const [a, b, ready] = m.l1[k];
+    if (t >= a && t < b) return t < ready ? 'arriving' : 'l1';
+  }
+  for (let k = m.l2.length - 1; k >= 0; k--) if (t >= m.l2[k][0] && t < m.l2[k][1]) return 'l2';
+  return 'mem';
+}
+
+// Accesses made by one instruction (one per line it touches).
+export function accessesOf(tr, id) {
+  if (!tr.eventsById) {
+    tr.eventsById = new Map();
+    for (const e of tr.events) {
+      if (!tr.eventsById.has(e.id)) tr.eventsById.set(e.id, []);
+      tr.eventsById.get(e.id).push(e);
+    }
+  }
+  return tr.eventsById.get(id) || [];
+}
+
+const wordsIn = (mask) => {
+  const out = [];
+  for (let w = 0; w < 8; w++) if (mask & (1 << w)) out.push(w);
+  return out;
+};
+
+// Why one access found or missed its line in L1, naming the instruction
+// responsible: who used the word before, whose neighboring word brought the
+// line in, or who pushed the line out. `mode` fits the sentence to what
+// happened next: 'hit', 'ride' (the line was still on its way), or 'miss'.
+export function localityWhy(tr, e, mode = e.cls >= LOC.COLD ? 'miss' : 'hit') {
+  const events = tr.events;
+  const k = events.indexOf(e);
+  const at = (q) => fmtInt(accessTime(tr, q));
+  if (e.cls === LOC.COLD) return { text: 'this is the first time this program touches this 64-byte line' };
+  if (e.cls === LOC.EVICTED) {
+    for (let j = k - 1; j >= 0; j--) {
+      const q = events[j];
+      if (q.ev1 === e.line) return { text: `this line was in L1 until cycle ${at(q)}, when ${label(tr, q.id)} brought in a line of its own and L1, being full, pushed this one out`, ref: q.id };
+    }
+    return { text: 'earlier runs of this code used this line, but L1 had pushed it out for room before this run began' };
+  }
+  // A hit: find when the line last arrived, then who used this word since.
+  let arrived = -1;
+  for (let j = k - 1; j >= 0; j--) {
+    const q = events[j];
+    if (q.line === e.line && q.cls >= LOC.COLD) {
+      arrived = j;
+      break;
+    }
+    if (q.ev1 === e.line) break;
+  }
+  const still = mode === 'ride' ? '' : ', and it is still in L1';
+  if (e.cls === LOC.REUSE) {
+    for (let j = k - 1; j >= Math.max(0, arrived); j--) {
+      const q = events[j];
+      if (q.line === e.line && (q.mask & e.mask)) return { text: `${label(tr, q.id)} ${mode === 'ride' ? 'already asked for' : 'used'} this same word at cycle ${at(q)}${still}: temporal locality`, ref: q.id };
+    }
+    return { text: `earlier runs of this code used this line${still}: temporal locality` };
+  }
+  if (arrived >= 0) {
+    const q = events[arrived];
+    const w0 = wordsIn(q.mask)[0];
+    const w1 = wordsIn(e.mask)[0];
+    const d = Math.abs(w1 - w0) * 8;
+    const where = d === 0 ? 'in the same line' : `${d} bytes ${w1 > w0 ? 'before' : 'after'} this one`;
+    return { text: `${label(tr, q.id)} ${mode === 'ride' ? 'sent for' : 'brought in'} this 64-byte line at cycle ${at(q)} for a word ${where}, and a line carries all eight words: spatial locality`, ref: q.id };
+  }
+  return { text: 'a neighboring word brought this line in: spatial locality' };
+}
+
+// ---------------------------------------------------------------------------
 // Statistics.
 
 export function computeStats(tr) {
@@ -146,7 +329,13 @@ export function computeStats(tr) {
   const unitWait = { alu: 0, fpu: 0, lsu: 0 };
   let orderWait = 0;
   let gatesWait = 0;
+  let nameWait = 0;
+  let writersPeak = 0;
+  let regsHeld = 0;
   for (let c = 0; c < cycles; c++) {
+    nameWait += cyc.nName[c];
+    if (cyc.writers[c] > writersPeak) writersPeak = cyc.writers[c];
+    if (cyc.board[c] === C.REGS) regsHeld++;
     robSum += cyc.rob[c];
     if (cyc.rob[c] > robPeak) robPeak = cyc.rob[c];
     if (cyc.memOut[c] > 0) {
@@ -173,6 +362,18 @@ export function computeStats(tr) {
   s.unitWait = unitWait;
   s.orderWait = orderWait;
   s.gatesWait = gatesWait;
+  s.nameWait = nameWait;
+  s.writersPeak = writersPeak;
+  s.regsHeld = regsHeld;
+
+  // How loads found their lines in L1, by kind of locality.
+  const ll = tr.loc.load;
+  const lTotal = ll[0] + ll[1] + ll[2] + ll[3];
+  s.locLoads = lTotal;
+  s.loc = [...ll].map((n) => (lTotal ? n / lTotal : 0));
+  s.locN = [...ll];
+  const st = tr.loc.store;
+  s.locStoreN = [...st];
 
   let maxIssue = -1;
   let overtakes = 0;
@@ -228,7 +429,9 @@ export const LOSS_TEXT = {
   [C.MEM]: 'instructions waiting on data from the caches or main memory',
   [C.UNIT]: 'ready instructions finding every station of their kind busy',
   [C.ORDER]: 'ready instructions held behind a stuck one by the fixed timetable',
+  [C.NAME]: 'instructions waiting for older ones to finish with a register name they reuse',
   [C.WINDOW]: 'a full platform, so nothing new could board',
+  [C.REGS]: 'running out of rename registers, so nothing new could board',
   [C.BRANCH]: 'recovering from mispredicted branches',
   [C.SUPPLY]: 'the entrance not delivering instructions fast enough',
   [C.DRAIN]: 'the last few instructions finishing',
@@ -276,7 +479,7 @@ export function findEpisodes(tr) {
     const counts = new Float64Array(16);
     for (let c = start; c < end; c++) for (let k = 0; k < W; k++) counts[cyc.slots[c * W + k]]++;
     let code = C.DEP;
-    for (const k of [C.DEP, C.MEM, C.UNIT, C.ORDER, C.WINDOW, C.BRANCH, C.SUPPLY, C.DRAIN]) if (counts[k] > counts[code]) code = k;
+    for (const k of [C.DEP, C.MEM, C.UNIT, C.ORDER, C.NAME, C.WINDOW, C.REGS, C.BRANCH, C.SUPPLY, C.DRAIN]) if (counts[k] > counts[code]) code = k;
     eps.push({ start, end, code });
   };
   for (let c = 0; c < cycles; c++) {
@@ -337,9 +540,17 @@ export function stateClause(tr, id, c) {
 export function waitClause(tr, id, code, ref) {
   switch (code) {
     case C.DEP:
-      return `waiting for a result from ${label(tr, ref)} (${OPS[tr.instrs[ref].op].short})`;
+      return `waiting for ${regName(tr.instrs[ref].dst)} from ${label(tr, ref)} (${OPS[tr.instrs[ref].op].short})`;
     case C.MEM:
-      return `waiting for ${label(tr, ref)} to bring data back from ${memWhere(tr, ref)}`;
+      return `waiting for ${regName(tr.instrs[ref].dst)}: ${label(tr, ref)} is bringing it from ${memWhere(tr, ref)}`;
+    case C.NAME: {
+      // Without renaming a register holds one value: the older instruction
+      // either still has to write this register (WAW) or read it (WAR).
+      const r = regName(tr.instrs[id].dst);
+      return tr.instrs[ref].dst === tr.instrs[id].dst
+        ? `ready, but ${r} is still in use: ${label(tr, ref)} must write ${r} first`
+        : `ready, but ${r} is still in use: ${label(tr, ref)} must read the old ${r} first`;
+    }
     case C.UNIT: {
       const unit = ['alu', 'fpu', 'lsu'][ref];
       return `ready, but ${allUnits(unit, tr.unitCount[unit]).replace(/^The|^Both|^All/, (m) => m.toLowerCase())} busy`;
@@ -355,6 +566,18 @@ export function waitClause(tr, id, code, ref) {
     default:
       return 'waiting';
   }
+}
+
+// The oldest instruction waiting with this code during cycle c: [id, ref].
+function firstWaiting(tr, c, code) {
+  const first = oldestWaiting(tr, c);
+  if (first < 0) return null;
+  for (let id = first; id < tr.N && tr.dispC[id] >= 0 && tr.dispC[id] <= c; id++) {
+    if (tr.issueC[id] >= 0 && tr.issueC[id] <= c) continue;
+    const w = waitAt(tr, id, c);
+    if (w && w[2] === code) return [id, w[3]];
+  }
+  return null;
 }
 
 // One-line service status for a machine at cycle c.
@@ -382,6 +605,22 @@ export function cycleStatus(tr, c) {
       out.push({ sev: iss === 0 ? 3 : 2, text: `Fixed timetable: ${label(tr, b)} ${stateClause(tr, b, c)}, so ${k} ready ${plural(k, 'instruction')} behind it must hold.` });
     }
   }
+  if (cyc.nName[c] > 0) {
+    const x = firstWaiting(tr, c, C.NAME);
+    if (x) {
+      const k = cyc.nName[c];
+      const [xid, ref] = x;
+      const r = regName(tr.instrs[xid].dst);
+      const waw = tr.instrs[ref].dst === tr.instrs[xid].dst;
+      // On a fixed-order network a younger vehicle's clash only matters
+      // when it is the one at the front of the line.
+      const leads = tr.OOO || xid === oldestWaiting(tr, c);
+      out.push({ sev: !leads ? 1 : iss === 0 ? 3 : 2, text: `Register clash: ${label(tr, xid)} is ready, but it writes ${r} and ${label(tr, ref)} ${waw ? `has yet to write ${r} itself` : `has yet to read the value in ${r}`}. Without renaming, ${k} ${plural(k, 'instruction')} ${plural(k, 'waits', 'wait')} for a register name.` });
+    }
+  }
+  if (cyc.board[c] === C.REGS) {
+    out.push({ sev: iss === 0 ? 3 : 1, text: `All ${tr.RENAME} rename registers are taken by results still aboard, so the entrance holds new vehicles until older ones exit and free one.` });
+  }
   const units = [['fpu', cyc.nUnitFpu], ['alu', cyc.nUnitAlu], ['lsu', cyc.nUnitLsu]];
   for (const [unit, arr] of units) {
     const k = arr[c];
@@ -399,7 +638,8 @@ export function cycleStatus(tr, c) {
   }
   if (iss === 0 && cyc.nMem[c] > 0) {
     const k = cyc.nMem[c];
-    out.push({ sev: 2, text: `Nothing departed: ${k} ${plural(k, 'instruction')} ${plural(k, 'is', 'are')} waiting on data from the caches or main memory (${cyc.memOut[c]} ${plural(cyc.memOut[c], 'trip')} under way).` });
+    const trips = cyc.memOut[c];
+    out.push({ sev: 2, text: `Nothing departed: ${k} ${plural(k, 'instruction')} ${plural(k, 'is', 'are')} waiting on data from the caches or main memory${trips ? ` (${trips} ${plural(trips, 'trip')} under way)` : ''}.` });
   } else if (iss === 0 && cyc.nDep[c] > 0) {
     const b = oldestWaiting(tr, c);
     const k = cyc.nDep[c];
@@ -430,15 +670,26 @@ export function instrStory(tr, id) {
   const i = tr.issueC[id];
   const dn = tr.doneC[id];
   const r = tr.retireC[id];
-  const totals = { entrance: 0, hold: 0, dep: 0, mem: 0, unit: 0, order: 0, width: 0, ride: 0, trip: 0, exitWait: 0 };
+  const totals = { entrance: 0, hold: 0, holdRegs: 0, dep: 0, mem: 0, unit: 0, order: 0, name: 0, width: 0, ride: 0, trip: 0, exitWait: 0 };
 
   ev.push({ c: f, kind: 'fetch', text: `Entered the network at the entrance, lane ${tr.feLane[id] + 1}.` });
   totals.entrance = Math.min(d, f + tr.FE) - f;
-  if (d > f + tr.FE) {
-    ev.push({ c: f + tr.FE, c2: d, kind: 'hold', code: C.WINDOW, text: 'Held at the end of the entrance: the platform was full.' });
-    totals.hold = d - (f + tr.FE);
+  // Held at the end of the entrance, split by why boarding stopped.
+  const HOLD_TEXT = {
+    [C.WINDOW]: 'Held at the end of the entrance: the platform was full.',
+    [C.REGS]: `Held at the end of the entrance: all ${tr.RENAME} rename registers were taken.`,
+    0: 'Waited at the end of the entrance while the vehicles ahead of it boarded.',
+  };
+  for (let c = f + tr.FE; c < d; ) {
+    const why = tr.cyc.board[c] || 0;
+    let e = c + 1;
+    while (e < d && (tr.cyc.board[e] || 0) === why) e++;
+    ev.push({ c, c2: e, kind: 'hold', code: why === C.REGS ? C.REGS : C.WINDOW, text: HOLD_TEXT[why] });
+    if (why === C.REGS) totals.holdRegs += e - c;
+    else totals.hold += e - c;
+    c = e;
   }
-  ev.push({ c: d, kind: 'board', text: `Boarded berth ${tr.slot[id] + 1} of ${tr.WIN}.` });
+  ev.push({ c: d, kind: 'board', text: `Boarded berth ${tr.slot[id] + 1} of ${tr.WIN}.${ins.dst >= 0 && tr.RENAME ? ` Its result will go to ${regName(ins.dst)}; renaming gives it a fresh register for that.` : ''}` });
   for (const [from, to, code, ref] of tr.waits[id]) {
     ev.push({ c: from, c2: to, kind: 'wait', code, ref, text: capitalize(waitClause(tr, id, code, ref)) + '.' });
     const n = to - from;
@@ -446,24 +697,31 @@ export function instrStory(tr, id) {
     else if (code === C.MEM || code === C.GATES) totals.mem += n;
     else if (code === C.UNIT) totals.unit += n;
     else if (code === C.ORDER) totals.order += n;
+    else if (code === C.NAME) totals.name += n;
     else if (code === C.WIDTH) totals.width += n;
   }
   const unitName = UNIT_NOUN[ins.unit];
+  const reads = ins.srcRegs.length ? `, reading ${joinList(ins.srcRegs.map(regName))}` : '';
   ev.push({
     c: i,
     kind: 'depart',
-    text: `Departed for ${unitName} ${tr.unitIdx[id] + 1}${ins.vector ? ` as a SIMD group, ${ins.lanes} of ${ins.width} lanes filled` : ''}.`,
+    text: `Departed for ${unitName} ${tr.unitIdx[id] + 1}${reads}${ins.vector ? ` as a SIMD group, ${ins.lanes} of ${ins.width} lanes filled` : ''}.`,
   });
   if (ins.type === 'load') {
     const lvl = tr.memLvl[id];
-    if (lvl === LVL.L1) ev.push({ c: i + tr.L1LAT, kind: 'hit', text: `L1 hit: data back after ${tr.L1LAT} cycles.` });
-    else if (lvl === LVL.SHARED_L1) ev.push({ c: i + 1, c2: dn, kind: 'shared', text: 'Its line was already on the way from an earlier miss; it rode along with that delivery.' });
-    else if (lvl === LVL.L2) ev.push({ c: i + tr.L1LAT, c2: dn, kind: 'l2', text: `Missed L1, found in L2: round trip of ${dn - i} cycles.` });
-    else if (lvl === LVL.SHARED_L2) ev.push({ c: i + tr.L1LAT, c2: dn, kind: 'shared', text: 'Missed L1; L2 was already fetching this line, so it waited for that delivery.' });
+    const acc = accessesOf(tr, id);
+    // The line whose data came back last decides when the load is done.
+    const e = acc.reduce((a, b) => (b.fill > a.fill ? b : a), acc[0]);
+    const why = localityWhy(tr, e, lvl === LVL.SHARED_L1 ? 'ride' : undefined);
+    const span = acc.length > 1 ? ` It spans ${acc.length} lines; this is the one that took longest.` : '';
+    if (lvl === LVL.L1) ev.push({ c: i + tr.L1LAT, kind: 'hit', loc: e.cls, ref: why.ref, text: `L1 hit, data back after ${tr.L1LAT} cycles: ${why.text}.${span}` });
+    else if (lvl === LVL.SHARED_L1) ev.push({ c: i + tr.L1LAT, c2: dn, kind: 'shared', loc: e.cls, ref: why.ref, text: `Its line was still on its way to L1, so it rode along with that delivery: ${why.text}.${span}` });
+    else if (lvl === LVL.L2) ev.push({ c: i + tr.L1LAT, c2: dn, kind: 'l2', loc: e.cls, ref: why.ref, text: `Missed L1: ${why.text}. Found in L2: round trip of ${dn - i} cycles.${span}` });
+    else if (lvl === LVL.SHARED_L2) ev.push({ c: i + tr.L1LAT, c2: dn, kind: 'shared', loc: e.cls, ref: why.ref, text: `Missed L1: ${why.text}. L2 was already fetching this line, so it waited for that delivery.${span}` });
     else {
       const gate = tr.gateAt[id];
       const bus = tr.busAt[id];
-      ev.push({ c: i + tr.L1LAT, kind: 'miss', text: tr.HAS_L2 ? 'Missed L1 and L2: bound for main memory.' : 'Missed L1: bound for main memory.' });
+      ev.push({ c: i + tr.L1LAT, kind: 'miss', loc: e.cls, ref: why.ref, text: `Missed ${tr.HAS_L2 ? 'L1 and L2' : 'L1'}: ${why.text}. Bound for main memory.${span}` });
       if (bus > gate) ev.push({ c: gate, c2: bus, kind: 'queue', code: C.MEM, text: `Queued ${bus - gate} ${plural(bus - gate, 'cycle')} at the memory line for bandwidth.` });
       ev.push({ c: bus, c2: dn, kind: 'trip', text: `Trip to main memory and back: ${tr.MEMLAT} cycles.` });
     }
@@ -475,7 +733,9 @@ export function instrStory(tr, id) {
     ? 'Resolved: the branch had been predicted wrong, so the entrance reopens now.'
     : ins.type === 'store'
       ? 'Address and data ready. The store is written to the cache when it exits.'
-      : 'Result ready; waiting instructions can use it now.';
+      : ins.type === 'branch'
+        ? 'Resolved: the branch went the predicted way.'
+        : `${ins.type === 'load' ? 'Data' : 'Result'} ready in ${regName(ins.dst)}; instructions waiting for it can use it now.`;
   ev.push({ c: dn, kind: 'done', text: doneText });
   if (r > dn + 1) {
     const b = retireBlocker(tr, id);
@@ -489,7 +749,12 @@ export function instrStory(tr, id) {
     });
     totals.exitWait = r - dn - 1;
   }
-  ev.push({ c: r, kind: 'exit', text: 'Exited at the terminus.' });
+  if (ins.type === 'store') {
+    const acc = accessesOf(tr, id);
+    const e = acc.find((x) => x.cls >= LOC.COLD) || acc[0];
+    const why = localityWhy(tr, e);
+    ev.push({ c: r, kind: 'exit', loc: e.cls, ref: why.ref, text: e.cls >= LOC.COLD ? `Exited, writing its data into L1, which had to bring the line in: ${why.text}.` : `Exited, writing its data into L1, where its line already was: ${why.text}.` });
+  } else ev.push({ c: r, kind: 'exit', text: ins.dst >= 0 && tr.RENAME ? `Exited at the terminus. ${regName(ins.dst)} now officially holds its result, and the register that held the previous value of ${regName(ins.dst)} is free again.` : 'Exited at the terminus.' });
 
   // Cycles from entering to exiting. Besides the totals above, one cycle
   // goes to boarding (a vehicle departs the cycle after it boards at the
@@ -500,8 +765,10 @@ export function instrStory(tr, id) {
     ['mem', totals.mem, 'waiting on memory'],
     ['unit', totals.unit, 'waiting for a free station'],
     ['order', totals.order, 'held by the fixed timetable'],
+    ['name', totals.name, 'waiting for its register to be free'],
     ['width', totals.width, 'waiting for a departure slot'],
-    ['hold', totals.hold, 'held outside a full platform'],
+    ['hold', totals.hold, 'held outside the platform'],
+    ['holdRegs', totals.holdRegs, 'held outside for want of a rename register'],
     ['exitWait', totals.exitWait, 'waiting to exit in order'],
   ].filter((x) => x[1] > 0).sort((a, b) => b[1] - a[1]);
   const waited = waitsList.reduce((a, x) => a + x[1], 0);
@@ -523,6 +790,13 @@ export function describeInstr(tr, id) {
   if (ins.vector) what = `SIMD ${def.name.toLowerCase()}: ${ins.lanes} ${plural(ins.lanes, 'operation')} (#${ins.ops.join(', #')}) in one vehicle`;
   const where = [];
   if (first.vec) where.push(`element ${first.vec.elem + 1}${ins.vector && ins.lanes > 1 ? '–' + (first.vec.elem + ins.lanes) : ''} of loop ${first.vec.loop + 1}, which can be vectorized`);
+  if (ins.lines) {
+    const reg = regionOf(ins.lines[0]);
+    const verb = ins.type === 'load' ? 'reads' : 'writes';
+    where.push(ins.vector
+      ? `it ${verb} ${ins.lanes} words of ${reg.name.toLowerCase()}, starting at ${hex(ins.addr)}, across ${ins.lines.length} ${plural(ins.lines.length, 'line')}`
+      : `it ${verb} the 8-byte word at ${hex(ins.addr)} in ${reg.name.toLowerCase()}`);
+  }
   if (ins.type === 'load' && first.src.length) {
     // A load's source is its address. Only a load feeding a load is a
     // pointer chase; otherwise an ordinary calculation produced it.
@@ -533,7 +807,10 @@ export function describeInstr(tr, id) {
       : `its address is calculated by ${names}, so it waits for that result`);
   }
   if (ins.mispredict) where.push('the branch predictor guesses this one wrong');
-  return { what, where };
+  const regs = [];
+  if (ins.srcRegs.length) regs.push(`reads ${joinList(ins.srcRegs.map(regName))}`);
+  if (ins.dst >= 0) regs.push(`writes its result to ${regName(ins.dst)}`);
+  return { what, where, regs: regs.length ? capitalize(joinList(regs)) + '.' : '' };
 }
 
 function capitalize(s) {
@@ -576,6 +853,28 @@ export function compareNarrative(A, B) {
     else if (saved <= -2) add(-saved * tb.MEMLAT / Math.max(1, sb.cycles), `The ${bigger} ${which} forced ${-saved} extra ${plural(-saved, 'trip')} to main memory.`);
     else if (keys.has('l1KB') && Math.abs((sb.l1Rate || 0) - (sa.l1Rate || 0)) > 0.02) add(0.2, `L1 hit rate moved from ${pct(sa.l1Rate)} to ${pct(sb.l1Rate)}, but main-memory trips stayed about the same (${sa.trips} vs ${sb.trips}).`);
     else add(0.05, `The ${bigger} ${which} changed almost nothing: this timetable ${sa.trips === 0 ? 'already fits in the caches' : 'touches data that does not fit either way'}.`);
+    // In L1 terms: lines pushed out for room and missed again later.
+    const ea = sa.locN[LOC.EVICTED];
+    const eb = sb.locN[LOC.EVICTED];
+    const ca = sa.locN[LOC.COLD];
+    const cb = sb.locN[LOC.COLD];
+    if (keys.has('l1KB') && ea !== eb) add(0.1 + Math.abs(ea - eb) / Math.max(1, sa.locLoads), `Loads that missed L1 on a line it had pushed out for room went from ${ea} to ${eb}.${ca === cb ? (cb ? ` First-use misses stayed at ${cb}: no cache size avoids those.` : '') : ` First-use misses went from ${ca} to ${cb}.`}`);
+  }
+  if (keys.has('renameRegs')) {
+    if (!A.cfg.renameRegs && B.cfg.renameRegs) {
+      const gained = tRatio > 1.02;
+      add(Math.max(0.15, slotPct(sa, C.NAME)), !sa.nameWait
+        ? `Renaming changed nothing here: ${A.name} never had to wait to reuse a register name.`
+        : gained
+          ? `Renaming gave every result a fresh register, so nothing waited to reuse a register name. Without it, ${A.name}’s instructions spent ${fmtInt(sa.nameWait)} instruction-${plural(sa.nameWait, 'cycle')} waiting for older ones to finish with their register.`
+          : `Renaming removed ${fmtInt(sa.nameWait)} instruction-${plural(sa.nameWait, 'cycle')} of waiting for register names, but ${B.cfg.ooo ? 'other waits took their place' : 'on a fixed-order network those instructions were held behind older ones anyway'}, so it saved no time.`);
+    } else if (A.cfg.renameRegs && !B.cfg.renameRegs) {
+      add(Math.max(0.15, slotPct(sb, C.NAME)), sb.nameWait
+        ? `Without renaming each register holds one value at a time, so instructions spent ${fmtInt(sb.nameWait)} instruction-${plural(sb.nameWait, 'cycle')} waiting for older ones to finish with a register name they reuse (${pct(slotPct(sb, C.NAME))} of departure capacity). Loops suffer most: every pass reuses the same names.`
+        : 'Without renaming, instructions still never had to wait for a register name here.');
+    } else {
+      add(0.1 + Math.abs(sa.regsHeld - sb.regsHeld) / Math.max(1, sa.cycles), `With ${B.cfg.renameRegs} rename registers, boarding stopped for want of one in ${fmtInt(sb.regsHeld)} ${plural(sb.regsHeld, 'cycle')} (was ${fmtInt(sa.regsHeld)} with ${A.cfg.renameRegs}). At most ${sb.writersPeak} were in use at once.`);
+    }
   }
   if (keys.has('ooo')) {
     if (B.cfg.ooo) {

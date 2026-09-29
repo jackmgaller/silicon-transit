@@ -23,6 +23,14 @@ const MIX_KEYS = [
 
 const pct = (v) => Math.round(v * 100) + '%';
 
+// What the generated accesses actually do, in program order.
+function localityLine(s) {
+  const L = s.locality;
+  const n = L.reuse + L.near + L.fresh;
+  if (!n) return '';
+  return ` Of its ${n} memory accesses, ${pct(L.reuse / n)} reuse a word and ${pct(L.near / n)} a line used before.`;
+}
+
 export class Planner {
   constructor(root, app) {
     this.root = root;
@@ -81,8 +89,10 @@ export class Planner {
     secB.append(this.buildMix());
     secB.append(slider('dependency', 'Dependency density', 0, 1, 0.01, pct, '--st-dep', (v) =>
       v < 0.15 ? 'Mostly independent work.' : v < 0.5 ? 'Some operations wait for earlier results.' : v < 0.95 ? 'Most operations wait for a recent result.' : 'One long chain: each step needs the one before.'));
-    secB.append(slider('locality', 'Memory locality', 0, 1, 0.01, pct, '--op-load', (v, s) =>
-      `${v < 0.3 ? 'Scattered data, far beyond the caches.' : v < 0.65 ? 'A medium working set.' : 'A tight working set.'} Heap ≈ ${formatBytes(s.heapBytes)}${s.arrays ? `, arrays ≈ ${formatBytes(s.arrayBytes)} each` : ''}.`));
+    secB.append(slider('spatial', 'Spatial locality', 0, 1, 0.01, pct, '--loc-near', (v, s) =>
+      `${v < 0.3 ? 'Scattered: most accesses land far from the last one.' : v < 0.7 ? 'Some accesses walk on to the next word.' : 'Mostly neighboring words, so one 64-byte line serves several accesses.'}${s.arrays ? ` ${s.inOrderArrays} of ${s.arrays} ${s.arrays === 1 ? 'array is' : 'arrays are'} read in order, the rest a line apart.` : ''}`));
+    secB.append(slider('temporal', 'Temporal locality', 0, 1, 0.01, pct, '--loc-reuse', (v, s) =>
+      `${v < 0.3 ? 'Little reuse: data is rarely touched again.' : v < 0.7 ? 'Some data is used again soon.' : 'Heavy reuse of a small working set.'} Heap ≈ ${formatBytes(s.heapBytes)}${s.arrays ? `, arrays ≈ ${formatBytes(s.arrayBytes)} each` : ''}.${localityLine(s)}`));
     secB.append(slider('vector', 'Vectorizability', 0, 1, 0.01, pct, '--op-fp', (v, s) =>
       v <= 0.001 ? 'No loops that SIMD lanes could pack.' : `${s.vecOps} operations sit in ${s.loops} ${s.loops === 1 ? 'loop' : 'loops'} that SIMD lanes can pack.`));
     secC.append(slider('predictability', 'Branch predictability', 0.5, 1, 0.01, pct, '--op-branch', (v, s) =>

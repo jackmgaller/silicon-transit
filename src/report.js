@@ -2,7 +2,7 @@
 // presented as operations statistics rather than a dashboard.
 
 import { h, clear } from './dom.js';
-import { C, CODE_INFO, SLOT_CODES } from './isa.js';
+import { C, CODE_INFO, SLOT_CODES, LOC, LOC_INFO } from './isa.js';
 import { PRESETS } from './workload.js';
 import { fmtInt, fmtTime, fmtX, pct, verdict, compareNarrative, limitSentence, bottleneck, FLOOR_INFO } from './analysis.js';
 
@@ -66,8 +66,58 @@ export function renderReport(root, app) {
   grid.append(statsTable(machines), capacity(machines));
   root.append(grid);
   const grid2 = h('div', { class: 'report-grid' });
-  grid2.append(limits(machines), why(machines, base, app));
+  grid2.append(locality(machines, workload), limits(machines));
   root.append(grid2);
+  const grid3 = h('div', { class: 'report-grid report-grid-one' });
+  grid3.append(why(machines, base, app));
+  root.append(grid3);
+}
+
+// How loads found their lines in L1, next to the locality the timetable
+// itself offers.
+function locality(machines, workload) {
+  const rows = h('div', { class: 'cap-rows' });
+  const P = workload.summary.locality;
+  const pn = P.reuse + P.near + P.fresh;
+  const seg = (frac, color, title) => (frac > 0.001 ? h('span', { style: `flex:${frac} 1 0;background:${color}`, title: `${title}: ${pct(frac, 1)}` }, frac >= 0.1 ? h('b', null, pct(frac)) : null) : null);
+  if (pn) {
+    rows.append(
+      h('div', { class: 'cap-row' },
+        h('span', { class: 'loc-tag', title: 'The timetable itself, before any cache' }, 'T'),
+        h('div', { class: 'stack stack-thin', role: 'img', 'aria-label': `Timetable: ${pct(P.reuse / pn)} reuse a word, ${pct(P.near / pn)} a line used before, ${pct(P.fresh / pn)} touch a new line` },
+          seg(P.reuse / pn, 'var(--loc-reuse)', 'Reuses a word used before'),
+          seg(P.near / pn, 'var(--loc-near)', 'Lands on a line used before'),
+          seg(P.fresh / pn, 'var(--rule-2)', 'Touches a new line'),
+        ),
+      ),
+    );
+  }
+  const notes = [];
+  for (const M of machines) {
+    const s = M.stats;
+    if (!s.locLoads) continue;
+    const stack = h('div', { class: 'stack', role: 'img', 'aria-label': [LOC.REUSE, LOC.NEAR, LOC.COLD, LOC.EVICTED].map((k) => `${LOC_INFO[k].label} ${pct(s.loc[k])}`).join(', ') },
+      [LOC.REUSE, LOC.NEAR, LOC.COLD, LOC.EVICTED].map((k) => seg(s.loc[k], `var(--loc-${LOC_INFO[k].key})`, LOC_INFO[k].long)),
+    );
+    rows.append(h('div', { class: 'cap-row' }, h('span', { class: 'bullet bullet-sm', style: `--line:${M.color}` }, M.letter), stack));
+    const ev = s.locN[LOC.EVICTED];
+    const hits = s.loc[LOC.REUSE] + s.loc[LOC.NEAR];
+    notes.push(h('li', null, h('b', null, `${M.name}: `),
+      `${pct(hits)} of its load lookups found their line in L1 (${pct(s.loc[LOC.REUSE])} reusing data, ${pct(s.loc[LOC.NEAR])} on a line a neighbor brought in).`,
+      ev ? ` ${ev} ${ev === 1 ? 'miss was' : 'misses were'} on lines L1 had pushed out for room: capacity misses, which only a bigger L1 can avoid.` : ' No load missed on a line L1 had pushed out.'));
+  }
+  if (!rows.children.length) return h('section', null, h('h3', null, 'Where loads found their data'), h('p', { class: 'field-hint' }, 'This timetable has no loads.'));
+  const legend = h('div', { class: 'cap-legend' },
+    [LOC.REUSE, LOC.NEAR, LOC.COLD, LOC.EVICTED].map((k) => h('span', null, h('i', { style: `background:var(--loc-${LOC_INFO[k].key})` }), LOC_INFO[k].long)),
+    h('span', null, h('i', { style: 'background:var(--rule-2)' }), 'Line new to this run (T only)'),
+  );
+  return h('section', null,
+    h('h3', null, 'Where loads found their data'),
+    h('p', { class: 'field-hint', style: 'margin:-4px 0 10px' }, 'Each load looks in L1 first, one 64-byte line at a time. T is the timetable on its own: how often an access reuses a word, or lands on a line, used earlier in this run. The lettered rows show how each network’s L1 served its loads. With warm caches, earlier runs have touched most lines, so a line new to this run can still miss as one L1 pushed out.'),
+    rows,
+    legend,
+    h('ul', { class: 'loc-notes' }, notes),
+  );
 }
 
 function statsTable(machines) {
@@ -85,6 +135,8 @@ function statsTable(machines) {
     ['Trips to main memory', null, (s) => s.trips, fmtInt, 'low'],
     ['Average load time', 'cycles', (s) => s.avgLoad, (v) => (v == null ? '—' : v.toFixed(1)), 'low'],
     ['Most loads out at once', 'memory-level parallelism', (s) => s.mlpPeak, fmtInt, null],
+    ['Waiting for a register name', 'instruction-cycles, without renaming', (s) => s.nameWait, fmtInt, 'low'],
+    ['Rename registers in use', 'most at once', (s, M) => (M.cfg.renameRegs ? s.writersPeak : null), (v) => (v == null ? '—' : fmtInt(v)), null],
     ['Wrong-route branches', null, (s) => s.mispredicts, fmtInt, null],
     ['SIMD lanes filled', 'of all lane capacity used', (s) => s.laneUtil, (v) => (v == null ? '—' : pct(v)), 'high'],
     ['Average aboard', 'instructions in the window', (s) => s.robAvg, (v) => v.toFixed(1), null],
@@ -97,7 +149,7 @@ function statsTable(machines) {
   );
   const body = h('tbody');
   for (const [label, sub, get, fmt, better] of rows) {
-    const vals = machines.map((M) => get(M.stats));
+    const vals = machines.map((M) => get(M.stats, M));
     const nums = vals.filter((v) => v != null);
     if (!nums.length) continue;
     const max = Math.max(...nums);

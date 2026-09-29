@@ -5,8 +5,8 @@
 
 import { X, computeLayout } from './layout.js';
 import { PAL, withAlpha } from './palette.js';
-import { C, LVL, OPS } from './isa.js';
-import { waitAt, headAt, oldestWaiting, fmtInt, cycleAt } from './analysis.js';
+import { C, LVL, OPS, LOC, NREG, regName } from './isa.js';
+import { waitAt, headAt, oldestWaiting, fmtInt, cycleAt, regVersions, writersAt, yardModel, lineWhere, accessesOf } from './analysis.js';
 
 const DEPOT_N = 6;
 export const K = { DEPOT: 0, FE: 1, BERTH: 2, UNIT: 3, MEM: 4, EXIT: 5 };
@@ -69,6 +69,9 @@ export class NetworkView {
     this.staticCanvas = null;
     this.journey = null;
     this.consumers = null;
+    this.yardGeom = null;
+    this.hoverLine = null;
+    this.hoverReg = -1;
     if (this.selected >= this.tr.N) this.selected = -1;
     if (this.cssW) this.resize(this.cssW, true);
   }
@@ -201,8 +204,19 @@ export class NetworkView {
   }
 
   // Waypoints between two snapshots, so vehicles follow the network's lines.
-  route(a, b, pa, pb) {
+  // A result riding home stops at its register on the board first.
+  route(a, b, pa, pb, id = -1) {
     const L = this.L;
+    const dst = id >= 0 ? this.tr.instrs[id].dst : -1;
+    const home = (pts, x, y) => {
+      const ay = L.aisleY(pb.row);
+      if (dst >= 0 && dst < NREG) {
+        const cell = L.reg.cells[dst];
+        const below = L.reg.y1 + 5;
+        pts.push({ x, y }, { x: cell.cx, y }, { x: cell.cx, y: cell.cy }, { x: cell.cx, y: below }, { x: pb.x, y: below }, { x: pb.x, y: ay }, pb);
+      } else pts.push({ x, y }, { x: pb.x, y }, { x: pb.x, y: ay }, pb);
+      return pts;
+    };
     if (a.k === K.MEM && b.k === K.MEM) {
       if (a.at === AT.PATH && b.at === AT.PATH) return L.memBetween(a.d, b.d);
       return [pa, pb];
@@ -218,10 +232,7 @@ export class NetworkView {
       const t = L.tracks[b.unit][b.idx];
       return [pa, { x: pa.x, y: ay }, { x: L.gridX1 + 6, y: ay }, { x: X.busX, y: ay }, { x: X.busX, y: t.y }, { x: t.x0 + 4, y: t.y }, pb];
     }
-    if (a.k === K.UNIT && b.k === K.BERTH) {
-      const ay = L.aisleY(pb.row);
-      return [pa, { x: X.riserX, y: pa.y }, { x: X.riserX, y: L.returnY }, { x: pb.x, y: L.returnY }, { x: pb.x, y: ay }, pb];
-    }
+    if (a.k === K.UNIT && b.k === K.BERTH) return home([pa, { x: X.riserX, y: pa.y }], X.riserX, L.returnY);
     if (a.k === K.UNIT && b.k === K.MEM) {
       const pts = [pa, { x: X.trackX1 + 8, y: pa.y }, { x: L.l1.x, y: L.l1.y }];
       if (b.at === AT.PATH && b.d > 0) pts.push(...L.memBetween(0, b.d).slice(1));
@@ -229,10 +240,9 @@ export class NetworkView {
       return pts;
     }
     if (a.k === K.MEM && b.k === K.BERTH) {
-      const ay = L.aisleY(pb.row);
       const pts = a.at === AT.PATH && a.d > 0 ? L.memBetween(a.d, 0) : [pa];
-      pts.push({ x: L.l1.x, y: L.l1.y }, { x: X.riserX, y: L.l1.y }, { x: X.riserX, y: L.returnY }, { x: pb.x, y: L.returnY }, { x: pb.x, y: ay }, pb);
-      return pts;
+      pts.push({ x: L.l1.x, y: L.l1.y }, { x: X.riserX, y: L.l1.y });
+      return home(pts, X.riserX, L.returnY);
     }
     return [pa, pb];
   }
@@ -301,7 +311,7 @@ export class NetworkView {
       let size;
       if (pa && pb) {
         const moving = pa.x !== pb.x || pa.y !== pb.y;
-        p = moving ? along(this.route(from, it.b, pa, pb), e) : pa;
+        p = moving ? along(this.route(from, it.b, pa, pb, it.id), e) : pa;
         const sa = this.sizeOf(from);
         const sb = this.sizeOf(it.b);
         size = [lerp(sa[0], sb[0], e), lerp(sa[1], sb[1], e)];
@@ -374,6 +384,8 @@ export class NetworkView {
     this.drawSignals(c, T);
     this.drawUnitsState(items, c);
     this.drawMemoryState(c, T, items);
+    this.drawRegisters(c, T, items);
+    this.drawYard(c, T, items);
 
     const selId = this.selected;
     const hasSel = selId >= 0;
@@ -470,14 +482,14 @@ export class NetworkView {
     const riserBottom = Math.max(...trackYs, L.l1.y);
     ctx.moveTo(X.riserX, riserBottom);
     ctx.lineTo(X.riserX, L.returnY);
-    ctx.lineTo(X.platX0 + 10, L.returnY);
+    ctx.lineTo(L.reg.cells[0].cx, L.returnY);
     for (const y of trackYs) {
       ctx.moveTo(X.trackX1 + 2, y);
       ctx.lineTo(X.riserX, y);
     }
     ctx.stroke();
     ctx.setLineDash([]);
-    this.label('return line · results ride back to their berths', X.riserX - 6, L.returnY - 7, { size: 7.5, weight: 600, color: PAL.ink3, align: 'right' });
+    this.label('return line · results ride home via their register', X.riserX - 6, L.returnY - 7, { size: 7.5, weight: 600, color: PAL.ink3, align: 'right' });
 
     // Depot board.
     ctx.fillStyle = withAlpha('#FFFFFF', 0.75);
@@ -527,6 +539,82 @@ export class NetworkView {
       ctx.lineWidth = 0.8;
       ctx.stroke();
     }
+
+    // Register board: sixteen names, each showing whose result it holds.
+    const R = L.reg;
+    ctx.fillStyle = withAlpha('#FFFFFF', 0.82);
+    ctx.strokeStyle = PAL.rule2;
+    ctx.lineWidth = 1.2;
+    rr(ctx, R.x0, R.y0, R.x1 - R.x0, R.y1 - R.y0, 10);
+    ctx.fill();
+    ctx.stroke();
+    this.label('REGISTERS', R.x0 + 12, R.headY, { size: 8, weight: 800, color: PAL.ink, spacing: 1 });
+    const regTitleW = this.textWidth('REGISTERS', 8, 800, 1);
+    this.label(tr.RENAME ? `16 names · renamed with ${tr.RENAME} spares` : '16 names · no renaming: one value per name', R.x0 + 12 + regTitleW + 7, R.headY, { size: 7.5, weight: 500, color: PAL.ink3 });
+    for (let r = 0; r < NREG; r++) {
+      const cell = R.cells[r];
+      rr(ctx, cell.x, cell.y, cell.w, cell.h, 4);
+      ctx.fillStyle = '#F1F3F2';
+      ctx.fill();
+      ctx.strokeStyle = PAL.rule;
+      ctx.lineWidth = 0.8;
+      ctx.stroke();
+      this.label(regName(r), cell.x + 8, cell.cy + 0.5, { size: 7, weight: 700, mono: true, color: PAL.ink2, align: 'center' });
+    }
+
+    // Cache yard: the lines this program touches, in address order.
+    const Y = L.yard;
+    const yg = this.yardLayout();
+    ctx.fillStyle = withAlpha('#FFFFFF', 0.78);
+    ctx.strokeStyle = PAL.rule2;
+    ctx.lineWidth = 1.2;
+    rr(ctx, Y.x0, Y.y0, Y.x1 - Y.x0, Y.y1 - Y.y0, 10);
+    ctx.fill();
+    ctx.stroke();
+    this.label('CACHE LINES', Y.x0 + 10, Y.y0 + 10, { size: 8, weight: 800, color: PAL.ink, spacing: 1 });
+    const yardTitleW = this.textWidth('CACHE LINES', 8, 800, 1);
+    this.label('8 words each', Y.x0 + 10 + yardTitleW + 6, Y.y0 + 10, { size: 7.5, weight: 500, color: PAL.ink3 });
+    for (const lb of yg.labels) this.label(lb.name.toUpperCase(), Y.x0 + 9, lb.y, { size: 6.5, weight: 800, color: PAL.ink3, spacing: 0.3 });
+    if (!yg.cars.length) this.label('this timetable never touches memory', (Y.x0 + Y.x1) / 2, (Y.y0 + Y.y1) / 2, { size: 8, weight: 600, color: PAL.ink3, align: 'center' });
+    // Legend: seat colors, then where a line is.
+    let lx = Y.x0 + 10;
+    const ly = Y.y1 - 8;
+    const key = (draw, text) => {
+      draw(lx, ly);
+      this.label(text, lx + 9, ly + 0.5, { size: 6.5, weight: 700, color: PAL.ink2 });
+      lx += 9 + this.textWidth(text, 6.5, 700) + 8;
+    };
+    const seat = (col) => (x, y) => {
+      ctx.fillStyle = col;
+      ctx.fillRect(x, y - 3, 6, 6);
+    };
+    const car = (stroke, fill, dash) => (x, y) => {
+      rr(ctx, x - 0.5, y - 3, 7, 6, 1.5);
+      if (fill) {
+        ctx.fillStyle = fill;
+        ctx.fill();
+      }
+      ctx.setLineDash(dash ? [1.5, 1.2] : []);
+      ctx.strokeStyle = stroke;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.setLineDash([]);
+    };
+    key(seat(PAL.loc[LOC.REUSE]), 'reused');
+    key(seat(PAL.loc[LOC.NEAR]), 'neighbor');
+    key(seat(PAL.loc[LOC.EVICTED]), 'missed');
+    key(car(PAL.memL1, '#FFFFFF'), 'in L1');
+    if (tr.HAS_L2) key(car(PAL.mem, '#E9F0FA'), 'L2');
+    key(car(withAlpha('#7C8594', 0.7), null, true), 'memory');
+    // A thin siding from L1 up to the yard.
+    ctx.strokeStyle = withAlpha(PAL.memL1.startsWith('#') ? PAL.memL1 : '#06A3C4', 0.45);
+    ctx.lineWidth = 1.2;
+    ctx.setLineDash([2, 3]);
+    ctx.beginPath();
+    ctx.moveTo(L.l1.x, L.l1.y - L.l1.r - 2);
+    ctx.lineTo(L.l1.x, Y.y1);
+    ctx.stroke();
+    ctx.setLineDash([]);
 
     // Interchange bus from platform to stations.
     const allTracks = [...L.tracks.alu, ...L.tracks.fpu, ...L.tracks.lsu];
@@ -678,7 +766,10 @@ export class NetworkView {
     ctx.moveTo(gp.x + 3, gp.y - 9);
     ctx.lineTo(gp.x + 3, gp.y + 9);
     ctx.stroke();
-    this.label(`memory line: 1 delivery every ${tr.BUS} cyc`, gp.x - 4, gp.y + 17, { size: 7.5, weight: 600, color: PAL.ink3 });
+    // A short memory route leaves little room before the terminal.
+    let bwText = `memory line: 1 delivery every ${tr.BUS} cyc`;
+    if (Math.abs(L.mem.y - gp.y) < 30 && gp.x - 4 + this.textWidth(bwText, 7.5, 600) > L.mem.x - 48) bwText = `1 delivery / ${tr.BUS} cyc`;
+    this.label(bwText, gp.x - 4, gp.y + 17, { size: 7.5, weight: 600, color: PAL.ink3 });
 
     // Main-memory terminal.
     const mp = L.mem;
@@ -792,6 +883,17 @@ export class NetworkView {
     } else if (refill) {
       this.label('refilling after wrong route', x + 10, y, { size: 8, weight: 700, color: PAL.ink2 });
     }
+    // Boarding held at the end of the entrance.
+    const stop = c < tr.cycles && cc >= 0 ? tr.cyc.board[cc] : 0;
+    if (stop === C.REGS || stop === C.WINDOW) {
+      const col = stop === C.REGS ? PAL.code[C.REGS] : PAL.code[C.UNIT];
+      const y0 = L.laneY[0] - 7;
+      const y1 = L.laneY[tr.W - 1] + 7;
+      ctx.fillStyle = col;
+      rr(ctx, X.holdX + 8, y0, 3, y1 - y0, 1.5);
+      ctx.fill();
+      this.label(stop === C.REGS ? 'HOLD · no spare register' : 'HOLD · platform full', X.holdX + 10, y1 + 8, { size: 7.5, weight: 800, color: col, align: 'right' });
+    }
   }
 
   drawUnitsState(items, c) {
@@ -863,8 +965,11 @@ export class NetworkView {
       const tL1 = i + tr.L1LAT;
       const dt = T - tL1;
       if (dt > -0.6 && dt < 0.9) {
+        // Colored like the yard: reused, neighbor, rode along, or missed.
+        const acc = accessesOf(tr, id);
+        const ev = acc.reduce((x, y) => (y.fill > x.fill ? y : x), acc[0]);
         const a = 1 - Math.abs(dt - 0.15) / 0.9;
-        const col = lvl === LVL.L1 ? PAL.good : lvl === LVL.SHARED_L1 ? PAL.code[C.DEP] : PAL.code[C.UNIT];
+        const col = lvl === LVL.SHARED_L1 ? PAL.shared : PAL.loc[ev ? ev.cls : LOC.COLD];
         this.flash(L.l1, L.l1.r + 4 + (dt + 0.6) * 5, col, a);
       }
       if (L.l2 && lvl !== LVL.L1 && lvl !== LVL.SHARED_L1) {
@@ -876,6 +981,343 @@ export class NetworkView {
         }
       }
     }
+  }
+
+  // ------------------------------------------------------------------------
+  // Registers.
+
+  // Where the capsule for register r sits inside its cell.
+  regCap(r) {
+    const cell = this.L.reg.cells[r];
+    return { x: cell.x + 16.5, y: cell.y + 2, w: cell.w - 19, h: cell.h - 4 };
+  }
+
+  drawRegisters(c, T, items) {
+    const ctx = this.ctx;
+    const tr = this.tr;
+    const L = this.L;
+    const R = L.reg;
+    const done = c >= tr.cycles;
+    // Registers some ready vehicle is waiting to write (no renaming).
+    const clash = new Set();
+    for (const it of items) {
+      const a = it.a;
+      if (a && a.k === K.BERTH && a.st === 0 && a.code === C.NAME) clash.add(tr.instrs[it.id].dst);
+    }
+    const sel = this.selected >= 0 ? tr.instrs[this.selected] : null;
+    for (let r = 0; r < NREG; r++) {
+      const cell = R.cells[r];
+      const cap = this.regCap(r);
+      const { latest, aboard } = regVersions(tr, r, done ? tr.cycles : c);
+      const rad = cap.h / 2;
+      if (latest < 0) {
+        // Nothing in this program has written it yet.
+        rr(ctx, cap.x, cap.y, cap.w, cap.h, rad);
+        ctx.setLineDash([1.6, 1.6]);
+        ctx.strokeStyle = PAL.rule2;
+        ctx.lineWidth = 0.9;
+        ctx.stroke();
+        ctx.setLineDash([]);
+      } else {
+        const ins = tr.instrs[latest];
+        const col = PAL.type[ins.type];
+        const dark = PAL.typeDark[ins.type];
+        const ready = tr.doneC[latest] >= 0 && tr.doneC[latest] <= c;
+        rr(ctx, cap.x, cap.y, cap.w, cap.h, rad);
+        if (ready) {
+          ctx.fillStyle = col;
+          ctx.fill();
+          ctx.strokeStyle = dark;
+          ctx.lineWidth = 0.8;
+          ctx.stroke();
+        } else {
+          ctx.fillStyle = '#FFFFFF';
+          ctx.fill();
+          ctx.setLineDash([2, 1.4]);
+          ctx.strokeStyle = col;
+          ctx.lineWidth = 1.2;
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+        this.label('#' + ins.num, cap.x + cap.w / 2, cap.y + cap.h / 2 + 0.6, { size: 7, weight: 700, mono: true, color: ready ? '#FFFFFF' : dark, align: 'center' });
+        // Renaming keeps older values of this name in spare registers
+        // until the vehicles after them exit: one dot each.
+        const older = aboard.length - (aboard[aboard.length - 1] === latest ? 1 : 0);
+        if (tr.RENAME && older > 0) {
+          ctx.fillStyle = PAL.ink2;
+          for (let k = 0; k < Math.min(3, older); k++) {
+            ctx.beginPath();
+            ctx.arc(cell.x + 4.4 + k * 3.6, cell.y + cell.h - 2.2, 1.1, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+        // The result lands: a ring as it is written.
+        const dt = T - tr.doneC[latest];
+        if (tr.doneC[latest] >= 0 && dt > -0.35 && dt < 1) {
+          const a = 1 - Math.abs(dt - 0.1) / 0.95;
+          rr(ctx, cell.x - 1.5 - dt * 2, cell.y - 1.5 - dt * 2, cell.w + 3 + dt * 4, cell.h + 3 + dt * 4, 5 + dt * 2);
+          ctx.globalAlpha = Math.max(0, Math.min(1, a));
+          ctx.strokeStyle = col;
+          ctx.lineWidth = 1.6;
+          ctx.stroke();
+          ctx.globalAlpha = 1;
+        }
+      }
+      const ring = (color, dash, pad = 2) => {
+        rr(ctx, cell.x - pad, cell.y - pad, cell.w + pad * 2, cell.h + pad * 2, 5);
+        ctx.setLineDash(dash ? [2.5, 1.8] : []);
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        ctx.setLineDash([]);
+      };
+      if (clash.has(r)) ring(PAL.code[C.NAME], true);
+      if (sel && sel.srcRegs.includes(r)) ring(PAL.code[C.DEP], false);
+      if (sel && sel.dst === r) ring(PAL.accent, false, 3.2);
+      if (this.hoverReg === r) ring(PAL.ink, false, 1.2);
+    }
+    // Rename pool meter.
+    if (tr.RENAME) {
+      const used = done ? 0 : writersAt(tr, c);
+      const full = used >= tr.RENAME;
+      const bw = 48;
+      const bx = R.x1 - 12 - bw;
+      const by = R.headY - 2.5;
+      rr(ctx, bx, by, bw, 5, 2.5);
+      ctx.fillStyle = '#E4E8EA';
+      ctx.fill();
+      if (used > 0) {
+        rr(ctx, bx, by, Math.max(5, (bw * used) / tr.RENAME), 5, 2.5);
+        ctx.fillStyle = full ? PAL.code[C.REGS] : PAL.accent;
+        ctx.fill();
+      }
+      this.label(`${used} / ${tr.RENAME} spares in use`, bx - 6, R.headY + 0.5, { size: 7.5, weight: 800, color: full ? PAL.code[C.REGS] : PAL.ink2, align: 'right' });
+    }
+    // Departing vehicles pick up their inputs from the board.
+    const e = this.frameE;
+    if (e > 0.02 && e < 0.98) {
+      for (const it of items) {
+        if (!it.a || it.a.k !== K.BERTH || !it.b || (it.b.k !== K.UNIT && it.b.k !== K.MEM)) continue;
+        const ins = tr.instrs[it.id];
+        if (!ins.srcRegs.length) continue;
+        const a = Math.sin(Math.PI * e) * (this.selected < 0 || this.selected === it.id ? 0.55 : 0.15);
+        ctx.globalAlpha = a;
+        ctx.strokeStyle = PAL.type[ins.type];
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        for (const r of ins.srcRegs) {
+          if (r < 0 || r >= NREG) continue;
+          const cell = R.cells[r];
+          ctx.moveTo(cell.cx, cell.y + cell.h);
+          ctx.lineTo(it.x, it.y);
+        }
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+    }
+  }
+
+  hitReg(mx, my) {
+    const R = this.L.reg;
+    if (mx < R.x0 || mx > R.x1 || my < R.y0 || my > R.y1) return -1;
+    for (let r = 0; r < NREG; r++) {
+      const cell = R.cells[r];
+      if (mx >= cell.x - 1.5 && mx <= cell.x + cell.w + 1.5 && my >= cell.y - 1.5 && my <= cell.y + cell.h + 1.5) return r;
+    }
+    return -1;
+  }
+
+  // ------------------------------------------------------------------------
+  // Cache yard.
+
+  // Car positions: each region of memory starts a row, labeled in the gutter;
+  // contiguous lines couple into trains. Cars shrink until everything fits.
+  yardLayout() {
+    if (this.yardGeom) return this.yardGeom;
+    const Y = this.L.yard;
+    const model = yardModel(this.tr);
+    const gutter = 32;
+    const x0 = Y.x0 + 8 + gutter;
+    const x1 = Y.x1 - 8;
+    const y0 = Y.y0 + 20;
+    const y1 = Y.y1 - 16;
+    let geom = null;
+    for (let sw = 3.4; sw >= 0.4 && !geom; sw -= 0.05) {
+      const w = 8 * sw + 2;
+      const h = Math.max(2.6, Math.min(8.5, sw * 2.5));
+      const rowGap = Math.max(1.6, h * 0.42);
+      const cars = [];
+      const labels = [];
+      let y = y0;
+      for (const reg of model.regions) {
+        let x = x0;
+        const top = y;
+        let prev = -2;
+        for (const m of reg.lines) {
+          const join = m.line === prev + 1;
+          let gap = x > x0 ? (join ? 1.3 : Math.max(2.4, sw * 1.1)) : 0;
+          if (x + gap + w > x1) {
+            y += h + rowGap;
+            x = x0;
+            gap = 0;
+          }
+          cars.push({ m, x: x + gap, y, w, h, sw, join: join && gap > 0 });
+          x += gap + w;
+          prev = m.line;
+        }
+        labels.push({ name: reg.short, y: top + h / 2 });
+        y = Math.max(y + h + rowGap + 2.5, top + 10);
+      }
+      if (y - rowGap - 2.5 <= y1 || sw < 0.45) geom = { cars, labels };
+    }
+    this.yardGeom = geom;
+    return geom;
+  }
+
+  drawYard(c, T, items) {
+    const ctx = this.ctx;
+    const tr = this.tr;
+    const L = this.L;
+    const Y = L.yard;
+    const g = this.yardLayout();
+    const byLine = new Map();
+    // L1 capacity: lines this run has used, other resident lines, free.
+    const cc = Math.max(0, Math.min(c, tr.cycles - 1));
+    const lines = tr.l1Lines;
+    const run = tr.cycles ? tr.cyc.l1Run[cc] : 0;
+    const size = tr.cycles ? tr.cyc.l1Size[cc] : 0;
+    const bw = 44;
+    const bx = Y.x1 - 10 - bw;
+    const by = Y.y0 + 7.5;
+    rr(ctx, bx, by, bw, 5, 2.5);
+    ctx.fillStyle = '#E4E8EA';
+    ctx.fill();
+    ctx.save();
+    rr(ctx, bx, by, bw, 5, 2.5);
+    ctx.clip();
+    ctx.fillStyle = withAlpha('#06A3C4', 0.3);
+    ctx.fillRect(bx, by, (bw * size) / lines, 5);
+    ctx.fillStyle = PAL.memL1;
+    ctx.fillRect(bx, by, Math.max(run ? 1.5 : 0, (bw * run) / lines), 5);
+    ctx.restore();
+    this.label(`L1 ${fmtInt(lines)} lines`, bx - 5, Y.y0 + 10.5, { size: 7, weight: 800, color: PAL.ink2, align: 'right' });
+
+    const sel = this.selected >= 0 ? accessesOf(tr, this.selected) : [];
+    const selLines = new Map(sel.map((e) => [e.line, e.mask]));
+    for (const car of g.cars) {
+      const m = car.m;
+      byLine.set(m.line, car);
+      const where = lineWhere(m, T);
+      const r = Math.min(2.2, car.h / 2.6);
+      rr(ctx, car.x, car.y, car.w, car.h, r);
+      if (where === 'l1' || where === 'arriving') ctx.fillStyle = '#FFFFFF';
+      else if (where === 'l2') ctx.fillStyle = '#E9F0FA';
+      else ctx.fillStyle = withAlpha('#FFFFFF', 0.35);
+      ctx.fill();
+      if (where === 'arriving') {
+        // The line is on its way: fill in as the delivery approaches.
+        let span = null;
+        for (const iv of m.l1) if (T >= iv[0] && T < iv[1]) span = iv;
+        if (span) {
+          const f = Math.max(0, Math.min(1, (T - span[0]) / Math.max(1, span[2] - span[0])));
+          ctx.fillStyle = withAlpha('#06A3C4', 0.18);
+          ctx.fillRect(car.x, car.y, car.w * f, car.h);
+        }
+      }
+      // Seats: one per 8-byte word, colored by how its latest access went.
+      const sw = (car.w - 2) / 8;
+      let flash = null;
+      for (let k = m.acc.length - 1; k >= 0; k--) {
+        const x = m.acc[k];
+        if (x.t <= T && T - x.t < 1.1) {
+          flash = x;
+          break;
+        }
+        if (x.t < T - 1.1) break;
+      }
+      for (let w = 0; w < 8; w++) {
+        let last = null;
+        for (let k = m.acc.length - 1; k >= 0; k--) {
+          const x = m.acc[k];
+          if (x.t <= T && x.e.mask & (1 << w)) {
+            last = x;
+            break;
+          }
+        }
+        if (!last) continue;
+        const age = T - last.t;
+        ctx.globalAlpha = age < 1 ? 1 : Math.max(0.55, 1 - (age - 1) / 120);
+        ctx.fillStyle = PAL.loc[last.e.cls];
+        ctx.fillRect(car.x + 1 + w * sw + (sw > 1.6 ? 0.3 : 0), car.y + 1, Math.max(0.6, sw - (sw > 1.6 ? 0.6 : 0)), car.h - 2);
+      }
+      ctx.globalAlpha = 1;
+      rr(ctx, car.x, car.y, car.w, car.h, r);
+      if (where === 'arriving' || where === 'mem') ctx.setLineDash([1.8, 1.4]);
+      ctx.strokeStyle = where === 'l1' || where === 'arriving' ? PAL.memL1 : where === 'l2' ? PAL.mem : withAlpha('#7C8594', 0.55);
+      ctx.lineWidth = where === 'mem' ? 0.7 : 1;
+      ctx.stroke();
+      ctx.setLineDash([]);
+      if (car.join) {
+        ctx.strokeStyle = PAL.ink3;
+        ctx.lineWidth = 0.9;
+        ctx.beginPath();
+        ctx.moveTo(car.x - 1.4, car.y + car.h / 2);
+        ctx.lineTo(car.x, car.y + car.h / 2);
+        ctx.stroke();
+      }
+      if (flash) {
+        const a = 1 - (T - flash.t) / 1.1;
+        ctx.globalAlpha = a;
+        rr(ctx, car.x - 1.5, car.y - 1.5, car.w + 3, car.h + 3, r + 1.5);
+        ctx.strokeStyle = PAL.loc[flash.e.cls];
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+      if (selLines.has(m.line) || this.hoverLine === m) {
+        rr(ctx, car.x - 2.5, car.y - 2.5, car.w + 5, car.h + 5, r + 2.5);
+        ctx.strokeStyle = this.hoverLine === m ? PAL.ink : PAL.accent;
+        ctx.lineWidth = 1.6;
+        ctx.stroke();
+      }
+    }
+    // Loads at L1 are looking up their line: a thread from L1 to the car.
+    // (Loads riding along wait in the bay; their car shows the delivery.)
+    for (const it of items) {
+      const s = it.s;
+      if (!s || s.k !== K.MEM || s.at !== AT.L1) continue;
+      for (const e of accessesOf(tr, it.id)) {
+        const car = byLine.get(e.line);
+        if (!car) continue;
+        const col = PAL.loc[e.cls];
+        ctx.globalAlpha = this.selected < 0 || this.selected === it.id ? 0.6 : 0.15;
+        ctx.strokeStyle = col;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(it.x, it.y);
+        ctx.lineTo(car.x + car.w / 2, car.y + car.h);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+    }
+  }
+
+  hitLine(mx, my) {
+    const Y = this.L.yard;
+    if (mx < Y.x0 || mx > Y.x1 || my < Y.y0 || my > Y.y1) return null;
+    const g = this.yardLayout();
+    let best = null;
+    let bd = Infinity;
+    for (const car of g.cars) {
+      const dx = Math.max(car.x - mx, 0, mx - (car.x + car.w));
+      const dy = Math.max(car.y - my, 0, my - (car.y + car.h));
+      const d = dx + dy;
+      if (d < bd) {
+        bd = d;
+        best = car.m;
+      }
+    }
+    return bd <= 2.5 ? best : null;
   }
 
   flash(p, r, col, a) {
@@ -1068,7 +1510,7 @@ export class NetworkView {
       if (!a || !b) continue;
       const pa = this.posOf(a, id, EMPTY);
       const pb = this.posOf(b, id, EMPTY);
-      for (const p of this.route(a, b, pa, pb)) push(p);
+      for (const p of this.route(a, b, pa, pb, id)) push(p);
     }
     const key = [
       [tr.fetchC[id], 'in'],

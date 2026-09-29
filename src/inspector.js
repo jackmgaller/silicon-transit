@@ -2,9 +2,8 @@
 // written from the trace as a route with stops.
 
 import { h, svg, clear } from './dom.js';
-import { C, CODE_INFO, TYPE_LABEL, OPS } from './isa.js';
-import { opLabel } from './workload.js';
-import { instrStory, describeInstr, stateClause, fmtInt, cycleAt } from './analysis.js';
+import { C, CODE_INFO, TYPE_LABEL, OPS, LOC_INFO, regName } from './isa.js';
+import { instrStory, describeInstr, stateClause, fmtInt, cycleAt, instrText } from './analysis.js';
 
 const ICON_X = '<svg viewBox="0 0 20 20"><path d="m5 5 10 10M15 5 5 15" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>';
 
@@ -50,7 +49,6 @@ export class Inspector {
   render(M, tr, id, c) {
     const app = this.app;
     const ins = tr.instrs[id];
-    const op = tr.workload.ops[ins.ops[0]];
     const story = this.story;
     const desc = describeInstr(tr, id);
     const root = clear(this.root);
@@ -59,12 +57,11 @@ export class Inspector {
       return h('button', { type: 'button', class: 'ref', title: 'Inspect this instruction', onclick: () => app.select(machine.uid, pid) },
         h('span', { class: 'cap', vars: { '--c': typeVar(pi.type) }, style: `background:${typeVar(pi.type)}` }, ''),
         h('span', null, `#${pi.num} ${OPS[pi.op].short}${pi.vector ? '×' + pi.lanes : ''}`),
+        pi.dst >= 0 ? h('small', { class: 'ref-reg' }, regName(pi.dst)) : null,
       );
     };
 
-    const label = ins.vector
-      ? `v${OPS[ins.op].short} ×${ins.lanes}${ins.src.length ? ' ← ' + ins.src.map((s) => '#' + tr.instrs[s].num).join(', ') : ''}`
-      : opLabel(op);
+    const label = instrText(tr, id);
     root.append(
       h('div', { class: 'insp-head' },
         h('span', { class: 'insp-vehicle', style: `--c:${typeVar(ins.type)}` }, '#' + ins.num),
@@ -80,6 +77,7 @@ export class Inspector {
       h('div', { class: 'insp-block' },
         h('h3', null, 'What it is'),
         h('p', { style: 'margin:0' }, desc.what + (desc.where.length ? '. ' + capitalize(desc.where.join('; ')) + '.' : '.')),
+        desc.regs ? h('p', { class: 'insp-regs' }, desc.regs) : null,
       ),
     );
 
@@ -109,10 +107,12 @@ export class Inspector {
     };
     add(T.entrance + 1, 'var(--line-entrance)', 'Entrance');
     add(T.hold, codeVar(C.WINDOW), 'Held outside');
+    add(T.holdRegs, codeVar(C.REGS), 'No spare register');
     add(T.dep, codeVar(C.DEP), 'Connection');
     add(T.mem, codeVar(C.MEM), 'Memory');
     add(T.unit, codeVar(C.UNIT), 'Station full');
     add(T.order, codeVar(C.ORDER), 'Held in order');
+    add(T.name, codeVar(C.NAME), 'Register in use');
     add(T.width, codeVar(C.WIDTH), 'Slots full');
     add(T.ride, typeVar(ins.type), 'At station');
     add(T.trip, typeVar('load'), 'Memory trip');
@@ -137,11 +137,12 @@ export class Inspector {
       const next = evs[k + 1];
       const end = ev.c2 != null ? ev.c2 : next ? next.c : ev.c + 1;
       const isNow = c >= ev.c && c < Math.max(end, ev.c + 1);
-      const color = ev.code != null ? codeVar(ev.code) : ev.kind === 'depart' || ev.kind === 'trip' || ev.kind === 'l2' ? typeVar(ins.type === 'load' ? 'load' : ins.type) : 'var(--rule-2)';
+      const color = ev.code != null ? codeVar(ev.code) : ev.loc != null ? `var(--loc-${LOC_INFO[ev.loc].key})` : ev.kind === 'depart' || ev.kind === 'trip' || ev.kind === 'l2' ? typeVar(ins.type === 'load' ? 'load' : ins.type) : 'var(--rule-2)';
       const when = ev.c2 != null && ev.c2 - ev.c > 1 ? `cycles ${fmtInt(ev.c)}–${fmtInt(ev.c2 - 1)} · ${ev.c2 - ev.c}` : `cycle ${fmtInt(ev.c)}`;
       const jump = h('button', { type: 'button', class: 'linkish', title: 'Jump the timeline here', onclick: () => app.jumpToLocal(M, ev.c) }, when);
       const textEl = h('span', null, ev.text);
-      if (ev.ref != null && ev.ref >= 0 && ev.kind !== 'exitwait' && ev.code !== C.UNIT) {
+      // Unit and gate waits carry a count in ref, not an instruction.
+      if (ev.ref != null && ev.ref >= 0 && ev.kind !== 'exitwait' && ev.code !== C.UNIT && ev.code !== C.GATES) {
         textEl.append(' ', h('button', { type: 'button', class: 'linkish', onclick: () => app.select(M.uid, ev.ref) }, `Inspect #${tr.instrs[ev.ref].num}`));
       } else if (ev.kind === 'exitwait' && ev.ref >= 0) {
         textEl.append(' ', h('button', { type: 'button', class: 'linkish', onclick: () => app.select(M.uid, ev.ref) }, `Inspect #${tr.instrs[ev.ref].num}`));

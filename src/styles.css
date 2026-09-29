@@ -54,6 +54,15 @@
   --st-drain: #E1E5E9;
   --st-width: #AEB6C1;
   --st-gates: #1C5DB8;
+  --st-name: #A0661B;
+  --st-regs: #5B45D6;
+
+  /* Cache yard: how an access found its line in L1 */
+  --loc-reuse: #22A45D;
+  --loc-near: #3B7BF0;
+  --loc-cold: #F0707A;
+  --loc-evicted: #C22A32;
+  --loc-ride: #F2A100;
 
   --line-entrance: #A7B0BC;
   --line-mem: #1C5DB8;
@@ -779,6 +788,32 @@ select {
   border-radius: 50%;
   background: var(--c);
   box-shadow: 0 0 0 1.5px var(--white), 0 0 0 2.5px var(--rule);
+}
+
+.seat {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  background: var(--c);
+  flex: none;
+}
+
+.legend-break {
+  margin-left: 6px;
+}
+
+.ref-reg {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--ink-3);
+}
+
+.insp-regs {
+  margin: 6px 0 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ink-2);
 }
 
 /* ------------------------------------------------------------ Networks */
@@ -1636,6 +1671,38 @@ select {
   color: var(--white);
   text-shadow: 0 1px 1px rgba(0, 0, 0, 0.25);
   overflow: hidden;
+}
+
+.stack-thin {
+  height: 14px;
+  border-radius: 5px;
+}
+
+.loc-tag {
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--paper-2);
+  color: var(--ink-2);
+  font-size: 10.5px;
+  font-weight: 800;
+}
+
+.loc-notes {
+  margin: 12px 0 0;
+  padding-left: 18px;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.loc-notes li + li {
+  margin-top: 4px;
+}
+
+.report-grid-one {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .cap-legend {

@@ -58,10 +58,23 @@ export function computeLayout(tr) {
   const platInnerH = rows * rowH + aisle;
   const platH = platInnerH + 30;
 
+  // Register board above the platform: the sixteen names in two rows.
+  const regRows = 2;
+  const regCols = 8;
+  const regHeadH = 18;
+  const regCellH = 15;
+  const regRowGap = 4;
+  const regH = regHeadH + regRows * regCellH + (regRows - 1) * regRowGap + 7;
+  const regGap = 10;
+  const coreH = regH + regGap + platH;
+
   const laneGap = W <= 2 ? 16 : W <= 4 ? 13 : 10.5;
   const entH = (W - 1) * laneGap + 40;
-  const contentH = Math.max(stationsH + 8, platH, entH, 200);
-  const yc = TOP + contentH / 2;
+  const contentH = Math.max(stationsH + 8, coreH + 4, entH, 200);
+  // The platform (and the entrance and depot that feed it) sits below the
+  // register board; the two are centered together.
+  const coreTop = TOP + (contentH - coreH) / 2;
+  const yc = coreTop + regH + regGap + platH / 2;
 
   const L = {
     W, FE, WIN, S, TOP, contentH, yc, laneH, bundleH, cols, rows, bw, bh, aisle, rowH, gapX,
@@ -76,6 +89,20 @@ export function computeLayout(tr) {
   // Depot list of upcoming instructions.
   L.depotStep = 17;
   L.depotY0 = yc - 2.5 * L.depotStep;
+
+  // Register board and its cells, spanning the entrance and the platform.
+  const regX0 = X.entX0 - 8;
+  const regX1 = X.platX1;
+  const cellGap = 5;
+  const cellW = (regX1 - regX0 - 20 - (regCols - 1) * cellGap) / regCols;
+  L.reg = { x0: regX0, x1: regX1, y0: coreTop, y1: coreTop + regH, headY: coreTop + 10, cells: [] };
+  for (let k = 0; k < regRows * regCols; k++) {
+    const row = Math.floor(k / regCols);
+    const col = k % regCols;
+    const x = regX0 + 10 + col * (cellW + cellGap);
+    const y = coreTop + regHeadH + row * (regCellH + regRowGap);
+    L.reg.cells.push({ x, y, w: cellW, h: regCellH, cx: x + cellW / 2, cy: y + regCellH / 2 });
+  }
 
   // Platform box and berths.
   L.platY0 = yc - platH / 2;
@@ -162,8 +189,17 @@ export function computeLayout(tr) {
     return pts;
   };
   L.l2 = cfg.l2KB ? { ...L.memPoint(L.dL2), r: l2r } : null;
+  // The cache yard: every line the program touches, above the memory line.
+  L.yard = { x0: 876, x1: 1128, y0: TOP - 8, y1: Math.max(TOP + 62, L.l1.y - L.l1.r - 42) };
   L.gate = L.memPoint(L.dGate);
   L.mem = L.memPoint(L.dMem);
+  // Keep the yard clear of the main-memory terminal when a long memory
+  // route carries it up the far side or along the top.
+  const Y = L.yard;
+  if (L.mem.x + 48 > Y.x0 && L.mem.x - 48 < Y.x1) {
+    if (L.mem.y - 23 < Y.y0 + 30) Y.y0 = L.mem.y + 23;
+    else if (L.mem.y - 23 < Y.y1) Y.y1 = Math.max(Y.y0 + 60, L.mem.y - 23);
+  }
   L.mshrBoxes = [];
   const perRow = Math.min(8, tr.MSHR);
   for (let m = 0; m < tr.MSHR; m++) {

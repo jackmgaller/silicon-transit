@@ -3,7 +3,7 @@
 // finished and exited, why it waited in between, and per-cycle occupancy.
 // Everything on screen is read from this trace.
 
-import { OPS, C, LVL } from './isa.js';
+import { OPS, C, LVL, LOC, NREG } from './isa.js';
 import { Cache } from './cache.js';
 import { memCycles, busCycles } from './machine.js';
 
@@ -18,7 +18,7 @@ export function lower(workload, cfg) {
   const instrs = [];
   const map = new Int32Array(ops.length).fill(-1);
 
-  const make = (laneOps, lanes, width, src, lines) => {
+  const make = (laneOps, lanes, width, src, lines, masks) => {
     const first = ops[laneOps[0]];
     const def = OPS[first.op];
     return {
@@ -34,11 +34,23 @@ export function lower(workload, cfg) {
       vector: width > 1,
       src,
       lines,
+      masks,
       addr: first.addr,
       mispredict: first.mispredict,
       loop: first.vec ? first.vec.loop : -1,
+      vslot: first.vec ? first.vec.slot : -1,
       num: laneOps[0],
     };
+  };
+  // The 64-byte lines an access touches, with the 8-byte words it uses in each.
+  const touch = (laneOps) => {
+    if (ops[laneOps[0]].addr == null) return [null, null];
+    const m = new Map();
+    for (const li of laneOps) {
+      const a = ops[li].addr;
+      m.set(a >>> 6, (m.get(a >>> 6) || 0) | (1 << ((a >>> 3) & 7)));
+    }
+    return [[...m.keys()], [...m.values()]];
   };
 
   let i = 0;
@@ -60,13 +72,8 @@ export function lower(workload, cfg) {
               if (m >= 0 && m !== id) srcSet.add(m);
             }
           }
-          let lines = null;
-          if (ops[laneOps[0]].addr != null) {
-            const ls = new Set();
-            for (const li of laneOps) ls.add(ops[li].addr >>> 6);
-            lines = [...ls];
-          }
-          instrs.push(make(laneOps, lanes, W, [...srcSet].sort((a, b) => a - b), lines));
+          const [lines, masks] = touch(laneOps);
+          instrs.push(make(laneOps, lanes, W, [...srcSet].sort((a, b) => a - b), lines, masks));
           for (const li of laneOps) map[li] = id;
         }
       }
@@ -74,12 +81,51 @@ export function lower(workload, cfg) {
     } else {
       const id = instrs.length;
       const src = [...new Set(op.src.map((s) => map[s]).filter((m) => m >= 0))].sort((a, b) => a - b);
-      instrs.push(make([i], 1, 1, src, op.addr != null ? [op.addr >>> 6] : null));
+      const [lines, masks] = touch([i]);
+      instrs.push(make([i], 1, 1, src, lines, masks));
       map[i] = id;
       i++;
     }
   }
+  allocateRegisters(instrs);
   return { instrs, map };
+}
+
+// Register allocation, the way a simple compiler would do it. Every result
+// gets one of the sixteen names; a name is free again once its value has no
+// readers left; a loop gives each of its steps the same name on every pass;
+// otherwise the name idle longest is chosen, which spreads reuse out.
+// Records each instruction's destination (dst), the names it reads
+// (srcRegs) and the previous writer of its destination (prevW).
+export function allocateRegisters(instrs) {
+  const N = instrs.length;
+  const lastUse = new Int32Array(N).fill(-1);
+  for (const ins of instrs) for (const p of ins.src) if (ins.id > lastUse[p]) lastUse[p] = ins.id;
+  // Spare names past r15 are a safety net only: in practice far fewer than
+  // sixteen values are ever live at once.
+  const SPARE = 64;
+  const holder = new Int32Array(SPARE).fill(-1);
+  const lastWriter = new Int32Array(SPARE).fill(-1);
+  const loopReg = new Map();
+  const free = (r, i) => holder[r] < 0 || Math.max(lastUse[holder[r]], holder[r]) <= i;
+  for (const ins of instrs) {
+    const i = ins.id;
+    ins.srcRegs = ins.src.map((p) => instrs[p].dst);
+    ins.dst = -1;
+    ins.prevW = -1;
+    if (ins.type === 'store' || ins.type === 'branch') continue;
+    const key = ins.loop >= 0 ? ins.loop * 256 + ins.vslot : -1;
+    let r = -1;
+    if (key >= 0 && loopReg.has(key) && free(loopReg.get(key), i)) r = loopReg.get(key);
+    for (let limit = NREG; r < 0 && limit <= SPARE; limit += SPARE - NREG) {
+      for (let q = 0; q < limit; q++) if (free(q, i) && (r < 0 || lastWriter[q] < lastWriter[r])) r = q;
+    }
+    ins.dst = r;
+    ins.prevW = lastWriter[r];
+    holder[r] = i;
+    lastWriter[r] = i;
+    if (key >= 0) loopReg.set(key, r);
+  }
 }
 
 // Growable typed array for per-cycle records.
@@ -115,7 +161,12 @@ export function simulate(workload, cfg) {
   const MEMLAT = memCycles(cfg);
   const BUS = busCycles(cfg);
   const MSHR = Math.max(1, cfg.mshr | 0);
+  // Spare registers for renaming; 0 means every register name is one fixed
+  // storage place, so reusing a name waits until older uses are finished.
+  const RENAME = Math.max(0, cfg.renameRegs | 0);
   const unitCount = { alu: cfg.alu | 0, fpu: cfg.fpu | 0, lsu: cfg.lsu | 0 };
+  const consumers = Array.from({ length: N }, () => []);
+  for (const ins of instrs) for (const p of ins.src) consumers[p].push(ins.id);
 
   // Per-instruction record.
   const fetchC = new Int32Array(N).fill(-1);
@@ -137,15 +188,37 @@ export function simulate(workload, cfg) {
   for (let k = 0; k < N; k++) waits[k] = [];
 
   // Caches, warmed with the workload's history if requested.
-  const l1 = new Cache(cfg.l1KB * 1024, 8);
-  const l2 = HAS_L2 ? new Cache(cfg.l2KB * 1024, 16) : null;
-  if (workload.params.warm && workload.warmLines) {
+  const l1 = new Cache(cfg.l1KB * 1024);
+  const l2 = HAS_L2 ? new Cache(cfg.l2KB * 1024) : null;
+  const warm = !!(workload.params.warm && workload.warmLines);
+  if (warm) {
     const wl = workload.warmLines;
     for (let k = 0; k < wl.length; k++) {
       if (l2) l2.access(wl[k]);
       l1.access(wl[k]);
     }
   }
+  // Lines the history touched: missing one of those later means it was
+  // pushed out, not that it was never used. Shared by every network.
+  const history = warm ? (workload.historySet ||= new Set(workload.warmLines)) : new Set();
+  // Every line this program touches, and where each one starts out.
+  const touched = new Set();
+  for (const ins of instrs) if (ins.lines) for (const ln of ins.lines) touched.add(ln);
+  const initL1 = new Set();
+  const initL2 = new Set();
+  for (const ln of touched) {
+    if (l1.has(ln)) initL1.add(ln);
+    if (l2 && l2.has(ln)) initL2.add(ln);
+  }
+  // Locality bookkeeping. l1Used: words used since each line arrived (lines
+  // left by the history are missing and count as fully used). everL1: lines
+  // that have been in L1 during this run. runRes: L1 lines this run has used.
+  const l1Used = new Map();
+  const everL1 = new Set();
+  const runSeen = new Set();
+  let runRes = 0;
+  const events = [];
+  const loc = { load: new Float64Array(4), store: new Float64Array(4) };
   const l1Fill = new Map();
   const l2Fill = new Map();
   const mshrUntil = new Int32Array(MSHR);
@@ -175,6 +248,8 @@ export function simulate(workload, cfg) {
   let robHead = 0;
   let robLen = 0;
   let retired = 0;
+  // Register-writing instructions aboard: each holds a rename register.
+  let writers = 0;
   const memActive = [];
   const lost = [];
 
@@ -202,7 +277,12 @@ export function simulate(workload, cfg) {
     nOrder: new Grow(Uint16Array),
     nWidth: new Grow(Uint16Array),
     nGates: new Grow(Uint16Array),
+    nName: new Grow(Uint16Array),
     nReady: new Grow(Uint16Array),
+    writers: new Grow(Uint16Array),
+    board: new Grow(Uint8Array),
+    l1Run: new Grow(Uint32Array),
+    l1Size: new Grow(Uint32Array),
   };
 
   const closeWait = (id, c) => {
@@ -218,6 +298,49 @@ export function simulate(workload, cfg) {
     wRef[id] = ref;
     wFrom[id] = c;
   };
+
+  // An access found its line in L1: was this word used since the line came
+  // in (reuse, temporal locality), or did a neighbor bring it (spatial)?
+  function hitClass(ln, mask) {
+    const used = l1Used.has(ln) ? l1Used.get(ln) : 0xff;
+    l1Used.set(ln, used | mask);
+    if (!runSeen.has(ln)) {
+      runSeen.add(ln);
+      runRes++;
+    }
+    return (mask & ~used) === 0 ? LOC.REUSE : LOC.NEAR;
+  }
+  // An access missed L1 and brings the line in, pushing another out if L1
+  // is full. Returns [class, evicted line].
+  function missIn(ln, mask) {
+    const cls = everL1.has(ln) || history.has(ln) ? LOC.EVICTED : LOC.COLD;
+    everL1.add(ln);
+    runSeen.add(ln);
+    runRes++;
+    const out = l1.insert(ln);
+    l1Used.set(ln, mask);
+    if (out >= 0) {
+      l1Used.delete(out);
+      if (runSeen.has(out)) runRes--;
+    }
+    return [cls, out];
+  }
+
+  // Without renaming, a register holds one value at a time. A result may
+  // only be written once the value it replaces is finished with: the older
+  // writer has written it and every older reader has read it. Returns the
+  // older instruction this one waits for, or -1.
+  function nameBlock(ins, c) {
+    const w = ins.prevW;
+    if (w < 0) return -1;
+    if (doneC[w] < 0 || doneC[w] > c) return w;
+    const rd = consumers[w];
+    for (let k = 0; k < rd.length; k++) {
+      const y = rd[k];
+      if (y !== ins.id && (issueC[y] < 0 || issueC[y] > c)) return y;
+    }
+    return -1;
+  }
 
   // A load departs: look up each line it touches, reserve memory gates and
   // bandwidth, and fix the cycle its data arrives. Returns false if it needs
@@ -244,7 +367,12 @@ export function simulate(workload, cfg) {
       let lvl;
       let gA = -1;
       let bA = -1;
+      let cls;
+      let ev1 = -1;
+      let ev2 = -1;
+      let in2 = false;
       if (l1.touch(ln)) {
+        cls = hitClass(ln, ins.masks[q]);
         const f = l1Fill.get(ln);
         if (f !== undefined && f > c + L1LAT) {
           done = f;
@@ -257,7 +385,7 @@ export function simulate(workload, cfg) {
         }
       } else {
         mem.l1Miss++;
-        l1.insert(ln);
+        [cls, ev1] = missIn(ln, ins.masks[q]);
         if (l2 && l2.touch(ln)) {
           const f2 = l2Fill.get(ln);
           if (f2 !== undefined && f2 > c + L2LAT) {
@@ -272,7 +400,8 @@ export function simulate(workload, cfg) {
         } else {
           if (l2) {
             mem.l2Miss++;
-            l2.insert(ln);
+            ev2 = l2.insert(ln);
+            in2 = true;
           }
           gA = c + L2LAT;
           bA = Math.max(gA, busFree);
@@ -297,6 +426,8 @@ export function simulate(workload, cfg) {
         }
         mshrUntil[best] = Math.max(mshrUntil[best], done);
       }
+      loc.load[cls]++;
+      events.push({ c, id, line: ln, mask: ins.masks[q], store: false, lvl, cls, fill: done, ev1, ev2, in2 });
       if (done > worstDone) {
         worstDone = done;
         worstLvl = lvl;
@@ -322,16 +453,27 @@ export function simulate(workload, cfg) {
       if (doneC[id] < 0 || doneC[id] >= c) break;
       retireC[id] = c;
       const ins = instrs[id];
+      if (ins.dst >= 0) writers--;
       if (ins.type === 'store') {
-        for (const ln of ins.lines) {
-          if (!l1.touch(ln)) {
-            l1.insert(ln);
+        // Stores write into the caches as they exit (write-allocate).
+        for (let q = 0; q < ins.lines.length; q++) {
+          const ln = ins.lines[q];
+          let cls;
+          let ev1 = -1;
+          let ev2 = -1;
+          let in2 = false;
+          if (l1.touch(ln)) cls = hitClass(ln, ins.masks[q]);
+          else {
+            [cls, ev1] = missIn(ln, ins.masks[q]);
             l1Fill.delete(ln);
           }
           if (l2 && !l2.touch(ln)) {
-            l2.insert(ln);
+            ev2 = l2.insert(ln);
+            in2 = true;
             l2Fill.delete(ln);
           }
+          loc.store[cls]++;
+          events.push({ c, id, line: ln, mask: ins.masks[q], store: true, lvl: cls >= LOC.COLD ? LVL.MEM : LVL.L1, cls, fill: c, ev1, ev2, in2 });
         }
       }
       robHead = (robHead + 1) % WIN;
@@ -347,7 +489,8 @@ export function simulate(workload, cfg) {
     lost.length = 0;
     let blocked = false;
     let blocker = -1;
-    let nDep = 0, nMem = 0, nUA = 0, nUF = 0, nUL = 0, nOrd = 0, nWid = 0, nGat = 0;
+    let nDep = 0, nMem = 0, nUA = 0, nUF = 0, nUL = 0, nOrd = 0, nWid = 0, nGat = 0, nNam = 0;
+    let nb;
     for (let k = 0; k < robLen; k++) {
       const id = rob[(robHead + k) % WIN];
       if (issueC[id] >= 0) continue;
@@ -381,6 +524,14 @@ export function simulate(workload, cfg) {
           rc = C.DEP;
         }
         ref = blk;
+        if (!OOO && !blocked) {
+          blocked = true;
+          blocker = id;
+        }
+      } else if (!RENAME && ins.dst >= 0 && (nb = nameBlock(ins, c)) >= 0) {
+        code = C.NAME;
+        ref = nb;
+        rc = C.NAME;
         if (!OOO && !blocked) {
           blocked = true;
           blocker = id;
@@ -444,18 +595,31 @@ export function simulate(workload, cfg) {
         case C.ORDER: nOrd++; break;
         case C.WIDTH: nWid++; break;
         case C.GATES: nGat++; break;
+        case C.NAME: nNam++; break;
       }
     }
 
     // ---- Boarding (dispatch) from the entrance onto the platform.
+    // Boarding stops at a full platform, or, when renaming, when the next
+    // vehicle needs a rename register and all of them are taken.
     let nD = 0;
-    while (nD < W && feHead < fetchPtr && fetchC[feHead] + FE <= c && robLen < WIN) {
+    let boardStop = 0;
+    while (nD < W && feHead < fetchPtr && fetchC[feHead] + FE <= c) {
+      if (robLen >= WIN) {
+        boardStop = C.WINDOW;
+        break;
+      }
+      if (RENAME && instrs[feHead].dst >= 0 && writers >= RENAME) {
+        boardStop = C.REGS;
+        break;
+      }
       const id = feHead++;
       dispC[id] = c;
       slot[id] = (robHead + robLen) % WIN;
       rob[slot[id]] = id;
       robLen++;
       nD++;
+      if (instrs[id].dst >= 0) writers++;
     }
 
     // ---- A wrong-route branch resolved: reopen the entrance.
@@ -494,6 +658,7 @@ export function simulate(workload, cfg) {
       if (k < lost.length) code = lost[k];
       else if (c >= slotFrom && c < brUntil) code = C.BRANCH;
       else if (robLen >= WIN) code = C.WINDOW;
+      else if (boardStop === C.REGS) code = C.REGS;
       else if (fetchPtr >= N) code = C.DRAIN;
       else code = C.SUPPLY;
       cy.slots.push(code);
@@ -544,12 +709,24 @@ export function simulate(workload, cfg) {
     cy.nOrder.push(nOrd);
     cy.nWidth.push(nWid);
     cy.nGates.push(nGat);
+    cy.nName.push(nNam);
     cy.nReady.push(nReady);
+    cy.writers.push(writers);
+    cy.board.push(boardStop);
+    cy.l1Run.push(runRes);
+    cy.l1Size.push(l1.size);
     c++;
   }
 
   const cyc = {};
   for (const k of Object.keys(cy)) cyc[k] = cy[k].done();
+  // Every instruction that writes each register, in program order.
+  const regWriters = [];
+  for (const ins of instrs) {
+    if (ins.dst < 0) continue;
+    (regWriters[ins.dst] ||= []).push(ins.id);
+  }
+  for (let r = 0; r < NREG; r++) regWriters[r] ||= [];
 
   return {
     cfg,
@@ -567,7 +744,10 @@ export function simulate(workload, cfg) {
     MEMLAT,
     BUS,
     MSHR,
+    RENAME,
     unitCount,
+    consumers,
+    regWriters,
     cycles: c,
     truncated: retired < N,
     fetchC,
@@ -587,5 +767,12 @@ export function simulate(workload, cfg) {
     mem,
     slotTotals,
     mispredicts,
+    events,
+    loc,
+    touched,
+    initL1,
+    initL2,
+    l1Lines: l1.lines,
+    l2Lines: l2 ? l2.lines : 0,
   };
 }

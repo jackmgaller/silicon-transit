@@ -3,8 +3,8 @@
 import { DEFAULT_WORKLOAD, generateWorkload, presetParams } from './workload.js';
 import { FLEET, LETTERS, LINE_COLORS, MAX_MACHINES, EXPERIMENTS, normalizeCfg } from './machine.js';
 import { simulate } from './sim.js';
-import { computeStats, findEpisodes, cycleStatus, fmtInt, fmtTime, stateClause, cycleAt } from './analysis.js';
-import { CODE_INFO } from './isa.js';
+import { computeStats, findEpisodes, cycleStatus, fmtInt, fmtTime, stateClause, cycleAt, instrText, regVersions, lineWhere } from './analysis.js';
+import { CODE_INFO, LOC, OPS, regName, hex } from './isa.js';
 import { readPalette } from './palette.js';
 import { h, svg, showMenu, closeMenu } from './dom.js';
 import { Planner } from './planner.js';
@@ -76,7 +76,7 @@ const app = {
   },
   setWorkload(key, v) {
     state.wl = { ...state.wl, [key]: v };
-    if (['mix', 'dependency', 'locality', 'vector', 'predictability'].includes(key)) state.wl.preset = 'custom';
+    if (['mix', 'dependency', 'spatial', 'temporal', 'vector', 'predictability'].includes(key)) state.wl.preset = 'custom';
     scheduleRegenerate();
   },
 
@@ -183,6 +183,11 @@ const app = {
 // --------------------------------------------------------------- Simulation
 
 function resim(M) {
+  // A hovered cache line or register belongs to the old run.
+  if (hoverState && hoverState.M === M && hoverState.kind !== 'vehicle') {
+    hoverState = null;
+    els.tooltip.hidden = true;
+  }
   M.trace = simulate(state.workload, M.cfg);
   M.stats = computeStats(M.trace);
   M.episodes = findEpisodes(M.trace);
@@ -423,25 +428,31 @@ function canvasPoint(M, e) {
 
 let tooltipKey = '';
 function showTooltip(hs) {
-  const { M, id, x, y } = hs;
+  const { M, x, y } = hs;
   const tr = M.trace;
-  if (id < 0 || id >= tr.N) {
-    els.tooltip.hidden = true;
-    tooltipKey = '';
-    return;
-  }
-  const ins = tr.instrs[id];
-  const c = Math.max(0, cycleAt(app.localCycle(M)));
-  const key = `${M.uid}:${M.version}:${id}:${c}:${x}:${y}`;
+  const lc = app.localCycle(M);
+  const c = Math.max(0, cycleAt(lc));
+  const key = `${M.uid}:${M.version}:${hs.kind}:${hs.id ?? hs.reg ?? hs.line?.line}:${c}:${x}:${y}`;
   if (key === tooltipKey && !els.tooltip.hidden) return;
   tooltipKey = key;
-  let what;
-  if (c < tr.fetchC[id]) what = `Next up. Enters at cycle ${fmtInt(tr.fetchC[id])}.`;
-  else if (c >= tr.retireC[id]) what = `Exited at cycle ${fmtInt(tr.retireC[id])}.`;
-  else if (c < tr.dispC[id]) what = 'In the entrance.';
-  else what = `It ${stateClause(tr, id, c)}.`;
+  let parts = null;
+  if (hs.kind === 'vehicle') {
+    const id = hs.id;
+    if (id < 0 || id >= tr.N) {
+      els.tooltip.hidden = true;
+      tooltipKey = '';
+      return;
+    }
+    let what;
+    if (c < tr.fetchC[id]) what = `Next up. Enters at cycle ${fmtInt(tr.fetchC[id])}.`;
+    else if (c >= tr.retireC[id]) what = `Exited at cycle ${fmtInt(tr.retireC[id])}.`;
+    else if (c < tr.dispC[id]) what = 'In the entrance.';
+    else what = `It ${stateClause(tr, id, c)}.`;
+    parts = [`#${tr.instrs[id].num} ${instrText(tr, id)}`, what, 'Click to follow its journey.'];
+  } else if (hs.kind === 'reg') parts = regTooltip(tr, hs.reg, c);
+  else parts = lineTooltip(tr, hs.line, lc);
   els.tooltip.innerHTML = '';
-  els.tooltip.append(h('b', null, `#${ins.num} ${ins.op}${ins.vector ? ` ×${ins.lanes}` : ''}`), h('span', { class: 'tt-sub' }, what), h('span', { class: 'tt-sub' }, 'Click to follow its journey.'));
+  els.tooltip.append(h('b', null, parts[0]), ...parts.slice(1).map((t) => h('span', { class: 'tt-sub' }, t)));
   els.tooltip.hidden = false;
   const tw = els.tooltip.offsetWidth;
   const th = els.tooltip.offsetHeight;
@@ -453,30 +464,102 @@ function showTooltip(hs) {
   els.tooltip.style.top = top + 'px';
 }
 
+const plural = (n, one, many) => (n === 1 ? one : many ?? one + 's');
+
+function regTooltip(tr, r, c) {
+  const name = regName(r);
+  const { latest, aboard } = regVersions(tr, r, c);
+  if (latest < 0) return [name, 'No instruction in this program has written it yet.'];
+  const ins = tr.instrs[latest];
+  const dn = tr.doneC[latest];
+  const ready = dn >= 0 && dn <= c;
+  const out = [name, `Holds the result of #${ins.num} (${OPS[ins.op].short}), ${ready ? `ready since cycle ${fmtInt(dn)}` : dn >= 0 ? `still on its way: ready at cycle ${fmtInt(dn)}` : 'which has not departed yet'}.`];
+  const older = aboard.filter((w) => w !== latest);
+  if (tr.RENAME && older.length) out.push(`Renaming still holds ${older.length} older ${plural(older.length, 'value')} of ${name} in spare registers (from ${older.slice(-3).map((w) => '#' + tr.instrs[w].num).join(', ')}${older.length > 3 ? ', …' : ''}); each is freed when the value after it exits.`);
+  if (!tr.RENAME) out.push(`No renaming: ${name} holds one value at a time, so a new writer waits until older ones are done with it.`);
+  out.push(`Click to inspect #${ins.num}.`);
+  return out;
+}
+
+function lineTooltip(tr, m, T) {
+  const where = lineWhere(m, T);
+  let span = null;
+  for (const iv of m.l1) if (T >= iv[0] && T < iv[1]) span = iv;
+  const whereText = {
+    l1: span && span[0] > -Infinity ? `In L1 since cycle ${fmtInt(Math.max(0, Math.ceil(span[2])))}.` : 'In L1, left there by earlier runs of this code.',
+    arriving: span ? `On its way into L1: it arrives at cycle ${fmtInt(span[2])}.` : 'On its way into L1.',
+    l2: 'In L2, but not in L1.',
+    mem: tr.HAS_L2 ? 'Only in main memory: in neither cache.' : 'Only in main memory.',
+  }[where];
+  const past = m.acc.filter((x) => x.t <= T);
+  let used = 0;
+  const n = [0, 0, 0, 0];
+  for (const x of past) {
+    used |= x.e.mask;
+    n[x.e.cls]++;
+  }
+  let words = 0;
+  for (let w = 0; w < 8; w++) if (used & (1 << w)) words++;
+  const out = [`Line ${hex(m.line * 64)} · ${m.region.name}`, whereText];
+  if (past.length) {
+    const kindText = ['reused', 'neighbor', 'missed (first use)', 'missed (pushed out earlier)'];
+    const kinds = [LOC.REUSE, LOC.NEAR, LOC.COLD, LOC.EVICTED].filter((k) => n[k]).map((k) => `${n[k]} ${kindText[k]}`);
+    out.push(`${past.length} ${plural(past.length, 'access', 'accesses')} so far (${kinds.join(', ')}), using ${words} of its 8 words.`);
+    out.push('Click to inspect the latest one.');
+  } else {
+    const next = m.acc[0];
+    out.push(next ? `First used at cycle ${fmtInt(next.t)}. Click to inspect that access.` : 'Not used yet.');
+  }
+  return out;
+}
+
 function wireCanvas(M) {
   const cv = M.el.canvas;
+  const setHover = (id, line, reg) => {
+    if (id !== M.view.hover || line !== M.view.hoverLine || reg !== M.view.hoverReg) {
+      M.view.hover = id;
+      M.view.hoverLine = line;
+      M.view.hoverReg = reg;
+      state.dirty = true;
+    }
+  };
   cv.addEventListener('pointermove', (e) => {
     const p = canvasPoint(M, e);
     const id = M.view.hit(p.x, p.y);
-    if (id !== M.view.hover) {
-      M.view.hover = id;
-      state.dirty = true;
-    }
-    cv.classList.toggle('is-pointing', id >= 0);
-    hoverState = id >= 0 ? { M, id, x: e.clientX, y: e.clientY } : null;
+    const line = id < 0 ? M.view.hitLine(p.x, p.y) : null;
+    const reg = id < 0 && !line ? M.view.hitReg(p.x, p.y) : -1;
+    setHover(id, line, reg);
+    cv.classList.toggle('is-pointing', id >= 0 || !!line || reg >= 0);
+    if (id >= 0) hoverState = { M, kind: 'vehicle', id, x: e.clientX, y: e.clientY };
+    else if (line) hoverState = { M, kind: 'line', line, x: e.clientX, y: e.clientY };
+    else if (reg >= 0) hoverState = { M, kind: 'reg', reg, x: e.clientX, y: e.clientY };
+    else hoverState = null;
     if (hoverState) showTooltip(hoverState);
     else els.tooltip.hidden = true;
   });
   cv.addEventListener('pointerleave', () => {
-    M.view.hover = -1;
+    setHover(-1, null, -1);
     hoverState = null;
     els.tooltip.hidden = true;
-    state.dirty = true;
   });
   cv.addEventListener('click', (e) => {
     const p = canvasPoint(M, e);
     const id = M.view.hit(p.x, p.y);
-    app.select(id >= 0 ? M.uid : null, id);
+    if (id >= 0) return app.select(M.uid, id);
+    const line = M.view.hitLine(p.x, p.y);
+    if (line) {
+      // The latest access to this line so far, or else the first one.
+      const T = app.localCycle(M);
+      const past = line.acc.filter((x) => x.t <= T);
+      const pick = past.length ? past[past.length - 1] : line.acc[0];
+      return app.select(pick ? M.uid : null, pick ? pick.e.id : -1);
+    }
+    const reg = M.view.hitReg(p.x, p.y);
+    if (reg >= 0) {
+      const { latest } = regVersions(M.trace, reg, Math.max(0, cycleAt(app.localCycle(M))));
+      if (latest >= 0) return app.select(M.uid, latest);
+    }
+    app.select(null);
   });
 }
 

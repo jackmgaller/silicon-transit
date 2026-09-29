@@ -52,6 +52,8 @@ export const C = {
   DRAIN: 8, // no work left to board, last services finishing
   WIDTH: 9, // ready, but this cycle's departure slots were all used
   GATES: 10, // load ready, but every memory gate (MSHR) is busy
+  NAME: 11, // ready, but its register is still needed by an older instruction
+  REGS: 12, // no free rename register, so nothing new can board
 };
 
 export const CODE_INFO = [
@@ -66,10 +68,31 @@ export const CODE_INFO = [
   { key: 'drain', label: 'End of service', short: 'Last trains' },
   { key: 'width', label: 'Departure slots all taken', short: 'Slots full' },
   { key: 'gates', label: 'Memory gates all busy', short: 'Gates full' },
+  { key: 'name', label: 'Register still in use', short: 'Register in use' },
+  { key: 'regs', label: 'Out of rename registers', short: 'No free registers' },
 ];
 
 // Codes that appear in the capacity breakdown, in display order.
-export const SLOT_CODES = [C.BUSY, C.DEP, C.MEM, C.UNIT, C.ORDER, C.WINDOW, C.BRANCH, C.SUPPLY, C.DRAIN];
+export const SLOT_CODES = [C.BUSY, C.DEP, C.MEM, C.UNIT, C.ORDER, C.NAME, C.WINDOW, C.REGS, C.BRANCH, C.SUPPLY, C.DRAIN];
+
+// Registers: sixteen names, r0–r15, shared by integer, floating-point and
+// SIMD values (on SIMD networks every register is as wide as the lanes).
+export const NREG = 16;
+export const regName = (r) => 'r' + r;
+
+// Why an access found (or missed) its line in L1.
+export const LOC = {
+  REUSE: 0, // this word was used before and is still here (temporal locality)
+  NEAR: 1, // a neighboring word brought the line in (spatial locality)
+  COLD: 2, // first time this program touched the line
+  EVICTED: 3, // the line was here before but was pushed out for room
+};
+export const LOC_INFO = [
+  { key: 'reuse', label: 'Reused', long: 'Reused data (temporal locality)' },
+  { key: 'near', label: 'Neighbor', long: 'Brought in by a neighbor (spatial locality)' },
+  { key: 'cold', label: 'First use', long: 'Missed: first use of the line' },
+  { key: 'evicted', label: 'Evicted', long: 'Missed: line was pushed out earlier' },
+];
 
 // Memory level reached by a load.
 export const LVL = { L1: 0, L2: 1, MEM: 2, SHARED_L1: 3, SHARED_L2: 4 };

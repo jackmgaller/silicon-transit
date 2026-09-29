@@ -4,6 +4,7 @@ export const PAL = {
   type: {},
   typeDark: {},
   code: [],
+  loc: [],
 };
 
 function darken(hex, f) {
@@ -40,8 +41,10 @@ export function readPalette() {
     PAL.typeDark[t] = darken(PAL.type[t], 0.72);
   }
   PAL.unit = { alu: PAL.type.int, fpu: PAL.type.fp, lsu: PAL.type.load };
-  const codes = ['busy', 'dep', 'mem', 'unit', 'order', 'window', 'branch', 'supply', 'drain', 'width', 'gates'];
+  const codes = ['busy', 'dep', 'mem', 'unit', 'order', 'window', 'branch', 'supply', 'drain', 'width', 'gates', 'name', 'regs'];
   PAL.code = codes.map((k) => get('--st-' + k, '#999999'));
+  PAL.loc = ['reuse', 'near', 'cold', 'evicted'].map((k) => get('--loc-' + k, '#999999'));
+  PAL.shared = get('--loc-ride', '#F2A100');
   PAL.fontUi = get('--font-ui', 'sans-serif');
   PAL.fontMono = get('--font-mono', 'monospace');
   PAL.fontDisplay = get('--font-display', 'sans-serif');
