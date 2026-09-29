@@ -34,6 +34,75 @@ function rr(ctx, x, y, w, h, r) {
   ctx.roundRect(x, y, w, h, Math.min(r, w / 2, h / 2));
 }
 
+// Aqua-era gloss for a filled capsule: light from above, shade below, a
+// specular band across the top and a faint rebound along the bottom.
+// Gradients depend only on height, so they are built once per height and
+// drawn with the capsule's corner as the origin.
+const glossCache = new Map();
+
+function glossFor(ctx, h) {
+  const key = Math.round(h * 4);
+  let g = glossCache.get(key);
+  if (g) return g;
+  h = key / 4;
+  const shade = ctx.createLinearGradient(0, 0, 0, h);
+  shade.addColorStop(0, 'rgba(255,255,255,0.24)');
+  shade.addColorStop(0.48, 'rgba(255,255,255,0)');
+  shade.addColorStop(0.6, 'rgba(20,24,32,0)');
+  shade.addColorStop(1, 'rgba(20,24,32,0.2)');
+  const spec = ctx.createLinearGradient(0, 0.8, 0, 0.8 + h * 0.44);
+  spec.addColorStop(0, 'rgba(255,255,255,0.72)');
+  spec.addColorStop(1, 'rgba(255,255,255,0.04)');
+  const rebound = ctx.createLinearGradient(0, h * 0.66, 0, h - 0.8);
+  rebound.addColorStop(0, 'rgba(255,255,255,0)');
+  rebound.addColorStop(1, 'rgba(255,255,255,0.3)');
+  g = { shade, spec, rebound };
+  glossCache.set(key, g);
+  return g;
+}
+
+// `px` is the capsule's height in screen pixels: tiny capsules get the
+// shading only, since a highlight that small reads as noise.
+function gloss(ctx, x, y, w, h, r, px) {
+  const g = glossFor(ctx, h);
+  ctx.translate(x, y);
+  rr(ctx, 0, 0, w, h, r);
+  ctx.fillStyle = g.shade;
+  ctx.fill();
+  if (px >= 6) {
+    const hx = Math.min(r * 0.6 + 1, w / 4);
+    const hh = h * 0.44;
+    rr(ctx, hx, 0.8, w - hx * 2, hh, Math.min(hh / 2, r));
+    ctx.fillStyle = g.spec;
+    ctx.fill();
+    if (px >= 10) {
+      rr(ctx, hx + 1, h * 0.66, w - hx * 2 - 2, h * 0.34 - 0.8, Math.min(h * 0.17, r));
+      ctx.fillStyle = g.rebound;
+      ctx.fill();
+    }
+  }
+  ctx.translate(-x, -y);
+}
+
+// The same light on a round station bullet.
+function glossDot(ctx, x, y, r) {
+  const shade = ctx.createLinearGradient(0, y - r, 0, y + r);
+  shade.addColorStop(0, 'rgba(255,255,255,0.26)');
+  shade.addColorStop(0.5, 'rgba(255,255,255,0)');
+  shade.addColorStop(1, 'rgba(20,24,32,0.22)');
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.fillStyle = shade;
+  ctx.fill();
+  const spec = ctx.createLinearGradient(0, y - r, 0, y);
+  spec.addColorStop(0, 'rgba(255,255,255,0.7)');
+  spec.addColorStop(1, 'rgba(255,255,255,0.02)');
+  ctx.beginPath();
+  ctx.ellipse(x, y - r * 0.42, r * 0.66, r * 0.44, 0, 0, Math.PI * 2);
+  ctx.fillStyle = spec;
+  ctx.fill();
+}
+
 // Point at fraction u along a polyline.
 function along(pts, u) {
   if (pts.length === 1 || u <= 0) return pts[0];
@@ -762,6 +831,7 @@ export class NetworkView {
         ctx.arc(X.plateX, t.y, 8.5, 0, Math.PI * 2);
         ctx.fillStyle = col;
         ctx.fill();
+        glossDot(ctx, X.plateX, t.y, 8.5);
         this.label(g.letter + (t.idx + 1), X.plateX, t.y + 0.5, { size: 8, weight: 800, color: '#FFFFFF', align: 'center' });
       }
     }
@@ -1099,6 +1169,8 @@ export class NetworkView {
         if (ready) {
           ctx.fillStyle = col;
           ctx.fill();
+          gloss(ctx, cap.x, cap.y, cap.w, cap.h, rad, cap.h * this.scale);
+          rr(ctx, cap.x, cap.y, cap.w, cap.h, rad);
           ctx.strokeStyle = dark;
           ctx.lineWidth = 0.8;
           ctx.stroke();
@@ -1475,6 +1547,13 @@ export class NetworkView {
         ctx.stroke();
       }
     } else {
+      // A soft contact shadow lifts the capsule off the map.
+      if (h * this.scale >= 6) {
+        rr(ctx, x + 0.4, y + 1.3, w - 0.8, h, r);
+        ctx.fillStyle = 'rgba(20,24,32,0.13)';
+        ctx.fill();
+        rr(ctx, x, y, w, h, r);
+      }
       ctx.fillStyle = col;
       ctx.fill();
       if (ins.vector || onTrack) {
@@ -1518,10 +1597,7 @@ export class NetworkView {
         }
         ctx.restore();
       }
-      // Gloss.
-      rr(ctx, x + 1.5, y + 1, w - 3, h * 0.42, r * 0.7);
-      ctx.fillStyle = withAlpha('#FFFFFF', 0.3);
-      ctx.fill();
+      gloss(ctx, x, y, w, h, r, h * this.scale);
       rr(ctx, x, y, w, h, r);
       ctx.lineWidth = 0.9;
       ctx.strokeStyle = dark;
