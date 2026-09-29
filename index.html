@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- HEAD:START -->
+<title>Silicon Transit</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Overpass+Mono:wght@500;600;700&family=Overpass:ital,wght@0,400;0,500;0,600;0,700;0,800;1,500&family=Unbounded:wght@500;700;800&display=swap">
+<link rel="stylesheet" href="src/styles.css">
+<!-- HEAD:END -->
+</head>
+<body>
+<!-- BODY:START -->
+<div class="app" id="app">
+  <header class="masthead">
+    <a class="brand" href="#app" aria-label="Silicon Transit home">
+      <svg class="brand-mark" viewBox="0 0 48 48" aria-hidden="true">
+        <path d="M4 14 H18 L30 26 H44" fill="none" stroke="var(--op-int)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M4 26 H44" fill="none" stroke="var(--op-load)" stroke-width="5" stroke-linecap="round"/>
+        <path d="M4 38 H18 L30 26" fill="none" stroke="var(--op-fp)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+        <circle cx="30" cy="26" r="6.5" fill="var(--card)" stroke="var(--ink)" stroke-width="3.2"/>
+      </svg>
+      <span class="brand-text">
+        <span class="wordmark">Silicon Transit</span>
+        <span class="tagline">A computational transit network. Every instruction has a journey.</span>
+      </span>
+    </a>
+    <nav class="mast-nav" aria-label="Sections">
+      <a class="mast-link" href="#fleet-anchor">Networks</a>
+      <a class="mast-link" href="#report">Service report</a>
+      <button class="btn btn-quiet" id="guide-open" type="button">How to read the map</button>
+    </nav>
+  </header>
+
+  <div class="shell" id="shell">
+    <aside class="planner panel" id="planner" aria-label="Workload planner"></aside>
+
+    <main class="stage" id="stage">
+      <div class="stage-head" id="fleet-anchor">
+        <div>
+          <p class="eyebrow">Fleet</p>
+          <h2 class="section-title">Networks in service</h2>
+        </div>
+        <div class="legend" id="legend" aria-label="Map legend"></div>
+      </div>
+      <div class="fleet" id="fleet"></div>
+      <div class="fleet-add" id="fleet-add"></div>
+      <section class="report" id="report" aria-label="Service report"></section>
+    </main>
+
+    <aside class="inspector panel" id="inspector" aria-label="Instruction inspector" hidden></aside>
+  </div>
+
+  <div class="transport" id="transport" role="toolbar" aria-label="Playback">
+    <div class="tp-buttons">
+      <button class="btn btn-round" id="tp-restart" type="button" title="Back to cycle 0 (Home)" aria-label="Back to cycle 0">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 4v12M16 4 8 10l8 6z" fill="currentColor" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
+      </button>
+      <button class="btn btn-round" id="tp-back" type="button" title="Back one cycle (←)" aria-label="Back one cycle">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M13 4 6 10l7 6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+      <button class="btn btn-jelly" id="tp-play" type="button" title="Play or pause (Space)" aria-label="Play">
+        <svg class="i-play" viewBox="0 0 20 20" aria-hidden="true"><path d="M6 3.8 16 10 6 16.2z" fill="currentColor"/></svg>
+        <svg class="i-pause" viewBox="0 0 20 20" aria-hidden="true"><path d="M5.5 4h3v12h-3zM11.5 4h3v12h-3z" fill="currentColor"/></svg>
+      </button>
+      <button class="btn btn-round" id="tp-fwd" type="button" title="Forward one cycle (→)" aria-label="Forward one cycle">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7 4 7 6-7 6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+    </div>
+    <div class="tp-clock" aria-live="off">
+      <span class="tp-label" id="tp-unit">Cycle</span>
+      <span class="tp-num" id="tp-num">0</span>
+      <span class="tp-sub" id="tp-sub">of 0</span>
+    </div>
+    <div class="tp-scrub" id="tp-scrub">
+      <canvas id="tp-canvas" aria-label="Timeline: drag to scrub"></canvas>
+    </div>
+    <div class="tp-controls">
+      <button class="btn btn-stall" id="tp-stall" type="button" title="Jump to the next stall (N)">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 10h9M9 6l4 4-4 4" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/><rect x="15" y="4" width="2.6" height="12" rx="1.3" fill="currentColor"/></svg>
+        <span>Next stall</span>
+      </button>
+      <label class="tp-speed">
+        <span class="sr-only">Playback speed</span>
+        <select id="tp-speed">
+          <option value="1">1 cycle/s</option>
+          <option value="2">2 cycles/s</option>
+          <option value="5">5 cycles/s</option>
+          <option value="10">10 cycles/s</option>
+          <option value="20">20 cycles/s</option>
+          <option value="50">50 cycles/s</option>
+          <option value="100">100 cycles/s</option>
+          <option value="250">250 cycles/s</option>
+          <option value="1000">1,000 cycles/s</option>
+        </select>
+      </label>
+      <div class="seg seg-sm" id="tp-sync" role="radiogroup" aria-label="Line up networks by">
+        <button type="button" role="radio" data-v="cycle" aria-checked="true">Cycles</button>
+        <button type="button" role="radio" data-v="time" aria-checked="false">Time</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="tooltip" id="tooltip" role="status" hidden></div>
+  <div class="guide-scrim" id="guide" hidden>
+    <div class="guide panel" role="dialog" aria-modal="true" aria-labelledby="guide-title">
+      <button class="btn btn-round guide-close" id="guide-close" type="button" aria-label="Close guide">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>
+      </button>
+      <p class="eyebrow">Passenger information</p>
+      <h2 class="section-title" id="guide-title">How to read the network</h2>
+      <div class="guide-grid" id="guide-body"></div>
+    </div>
+  </div>
+</div>
+
+<script type="module" src="src/main.js"></script>
+<!-- BODY:END -->
+</body>
+</html>
