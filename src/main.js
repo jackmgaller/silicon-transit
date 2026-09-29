@@ -482,6 +482,7 @@ function regTooltip(tr, r, c) {
 }
 
 function lineTooltip(tr, m, T) {
+  if (m.members) return groupTooltip(tr, m, T);
   const where = lineWhere(m, T);
   let span = null;
   for (const iv of m.l1) if (T >= iv[0] && T < iv[1]) span = iv;
@@ -509,6 +510,35 @@ function lineTooltip(tr, m, T) {
   } else {
     const next = m.acc[0];
     out.push(next ? `First used at cycle ${fmtInt(next.t)}. Click to inspect that access.` : 'Not used yet.');
+  }
+  return out;
+}
+
+// A yard car carrying several lines, on timetables too big for one per line.
+function groupTooltip(tr, g, T) {
+  const n = g.members.length;
+  const at = { l1: 0, arriving: 0, l2: 0, mem: 0 };
+  let used = 0;
+  for (const m of g.members) {
+    at[lineWhere(m, T)]++;
+    if (m.acc.length && m.acc[0].t <= T) used++;
+  }
+  const whereText = [
+    at.l1 && `${at.l1} in L1`,
+    at.arriving && `${at.arriving} on the way into L1`,
+    at.l2 && `${at.l2} in L2 only`,
+    at.mem && `${at.mem} only in main memory`,
+  ].filter(Boolean).join(', ');
+  const past = g.acc.filter((x) => x.t <= T);
+  const out = [
+    `Lines ${hex(g.line * 64)}–${hex(g.last * 64)} · ${g.region.name}`,
+    `This timetable touches too many lines to show one per car, so this car carries ${n} neighboring lines, ${n > 8 ? `up to ${Math.ceil(n / 8)} per seat` : 'one per seat'}. ${whereText[0].toUpperCase()}${whereText.slice(1)}.`,
+  ];
+  if (past.length) {
+    out.push(`${past.length} ${plural(past.length, 'access', 'accesses')} so far, to ${used} of its ${n} lines.`);
+    out.push('Click to inspect the latest one.');
+  } else {
+    out.push(`First used at cycle ${fmtInt(g.acc[0].t)}. Click to inspect that access.`);
   }
   return out;
 }

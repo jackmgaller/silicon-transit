@@ -2,7 +2,7 @@
 // and a strip preview of the generated program.
 
 import { h, svg, clear } from './dom.js';
-import { PRESETS, SITE_KINDS, formatBytes } from './workload.js';
+import { PRESETS, SITE_KINDS, MAX_SIZE, formatBytes } from './workload.js';
 import { PAL } from './palette.js';
 
 const ICONS = {
@@ -25,6 +25,22 @@ const ICON_COLLAPSE = '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M12.
 const COLLAPSED_KEY = 'silicon-transit:planner-collapsed';
 
 const pct = (v) => Math.round(v * 100) + '%';
+
+// Workload size runs from a few dozen operations to thousands, so its slider
+// is logarithmic, snapped to two significant figures (40, 41 … 990, 1,000,
+// 1,100 … 10,000).
+const SIZE_MIN = 40;
+const SIZE_SCALE = {
+  steps: 1000,
+  fromPos(pos) {
+    const v = SIZE_MIN * (MAX_SIZE / SIZE_MIN) ** (pos / this.steps);
+    const unit = 10 ** Math.max(0, Math.floor(Math.log10(v)) - 1);
+    return Math.min(MAX_SIZE, Math.round(v / unit) * unit);
+  },
+  toPos(v) {
+    return Math.round((this.steps * Math.log(Math.max(SIZE_MIN, v) / SIZE_MIN)) / Math.log(MAX_SIZE / SIZE_MIN));
+  },
+};
 
 // What the generated accesses actually do, in program order.
 function localityLine(s) {
@@ -92,24 +108,27 @@ export class Planner {
     secA.append(h('div', { class: 'field' }, h('span', { class: 'field-label' }, 'Service patterns'), presets), this.blurb);
 
     this.sliders = {};
-    const slider = (key, label, min, max, step, fmt, line, hintFn) => {
+    // `scale` maps a slider position to a value and back, for sliders that
+    // aren't linear.
+    const slider = (key, label, min, max, step, fmt, line, hintFn, scale) => {
       const input = h('input', { type: 'range', class: 'range', id: 'wl-' + key, min, max, step, vars: { '--line': `var(${line})` } });
       const val = h('span', { class: 'field-value' });
       const hint = h('span', { class: 'field-hint' });
       input.addEventListener('input', () => {
-        const v = +input.value;
+        const v = scale ? scale.fromPos(+input.value) : +input.value;
         this.paintRange(input);
         val.textContent = fmt(v);
-        app.setWorkload(key, v);
+        if (v !== app.state.wl[key]) app.setWorkload(key, v);
       });
-      this.sliders[key] = { input, val, fmt, hint, hintFn };
+      this.sliders[key] = { input, val, fmt, hint, hintFn, scale };
       return h('div', { class: 'field' },
         h('label', { class: 'field-row', for: 'wl-' + key }, h('span', { class: 'field-label' }, label), val),
         input,
         hint,
       );
     };
-    secA.append(slider('size', 'Workload size', 40, 800, 10, (v) => `${v} operations`, '--ink', null));
+    secA.append(slider('size', 'Workload size', 0, SIZE_SCALE.steps, 1, (v) => `${v.toLocaleString('en-US')} operations`, '--ink', (v) =>
+      v > 2000 ? 'A long timetable: each change re-runs every network, which takes a moment.' : '', SIZE_SCALE));
     secB.append(this.buildMix());
     secB.append(slider('dependency', 'Dependency density', 0, 1, 0.01, pct, '--st-dep', (v) =>
       v < 0.15 ? 'Mostly independent work.' : v < 0.5 ? 'Some operations wait for earlier results.' : v < 0.95 ? 'Most operations wait for a recent result.' : 'One long chain: each step needs the one before.'));
@@ -219,9 +238,9 @@ export class Planner {
     const preset = PRESETS.find((p) => p.id === wl.preset);
     this.blurb.textContent = preset ? preset.blurb : 'Custom timetable. Pick a pattern above to start from a preset.';
     for (const [key, sl] of Object.entries(this.sliders)) {
-      if (document.activeElement !== sl.input) sl.input.value = wl[key];
+      if (document.activeElement !== sl.input) sl.input.value = sl.scale ? sl.scale.toPos(wl[key]) : wl[key];
       this.paintRange(sl.input);
-      sl.val.textContent = sl.fmt(+sl.input.value);
+      sl.val.textContent = sl.fmt(sl.scale ? wl[key] : +sl.input.value);
       if (sl.hintFn) sl.hint.textContent = sl.hintFn(wl[key], s);
     }
     if (document.activeElement !== this.seedInput) this.seedInput.value = wl.seed;

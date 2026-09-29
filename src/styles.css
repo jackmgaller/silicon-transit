@@ -729,6 +729,10 @@ select {
   line-height: 1.35;
 }
 
+.field-hint:empty {
+  display: none;
+}
+
 .split {
   display: grid;
   grid-template-columns: 1fr auto;

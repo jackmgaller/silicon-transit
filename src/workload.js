@@ -69,6 +69,10 @@ export function presetParams(id, base = {}) {
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
+// A pointer chase at this size runs ~700k cycles and keeps ~55 MB of trace
+// per network, which is about as far as a browser tab should be pushed.
+export const MAX_SIZE = 10000;
+
 export function normalizeWorkloadParams(p) {
   const mix = {
     int: Math.max(0, +p.mix?.int || 0),
@@ -80,7 +84,7 @@ export function normalizeWorkloadParams(p) {
   // Older timetables had one locality knob; it sets both kinds.
   const loc = p.locality == null ? 0.5 : +p.locality;
   return {
-    size: clamp(Math.round(+p.size || 200), 24, 1000),
+    size: clamp(Math.round(+p.size || 200), 24, MAX_SIZE),
     mix,
     dependency: clamp(+p.dependency || 0, 0, 1),
     spatial: clamp(p.spatial == null ? loc : +p.spatial || 0, 0, 1),

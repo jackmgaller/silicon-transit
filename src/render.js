@@ -103,6 +103,48 @@ function glossDot(ctx, x, y, r) {
   ctx.fill();
 }
 
+// Cache lines packed several to a yard car, in address order. A group looks
+// like one line to lineWhere and to clicks: its accesses and residency spans
+// are its members' merged.
+function groupLines(lines, per) {
+  const out = [];
+  const byStart = (a, b) => a[0] - b[0];
+  for (let i = 0; i < lines.length; i += per) {
+    const members = lines.slice(i, i + per);
+    if (members.length === 1) {
+      out.push(members[0]);
+      continue;
+    }
+    out.push({
+      line: members[0].line,
+      last: members[members.length - 1].line,
+      region: members[0].region,
+      members,
+      acc: members.flatMap((m) => m.acc).sort((a, b) => a.t - b.t),
+      l1: members.flatMap((m) => m.l1).sort(byStart),
+      l2: members.flatMap((m) => m.l2).sort(byStart),
+    });
+  }
+  return out;
+}
+
+// For a group, the latest access at or before t to the lines under each seat.
+function seatLatest(g, seats, t) {
+  const out = new Array(seats).fill(null);
+  const n = g.members.length;
+  g.members.forEach((m, i) => {
+    const s = Math.floor((i * seats) / n);
+    for (let k = m.acc.length - 1; k >= 0; k--) {
+      const x = m.acc[k];
+      if (x.t <= t) {
+        if (!out[s] || x.t > out[s].t) out[s] = x;
+        break;
+      }
+    }
+  });
+  return out;
+}
+
 // Point at fraction u along a polyline.
 function along(pts, u) {
   if (pts.length === 1 || u <= 0) return pts[0];
@@ -685,7 +727,7 @@ export class NetworkView {
     ctx.stroke();
     this.label('CACHE LINES', Y.x0 + 10, Y.y0 + 10, { size: 8, weight: 800, color: PAL.ink, spacing: 1 });
     const yardTitleW = this.textWidth('CACHE LINES', 8, 800, 1);
-    this.label('8 words each', Y.x0 + 10 + yardTitleW + 6, Y.y0 + 10, { size: 7.5, weight: 500, color: PAL.ink3 });
+    this.label(yg.per > 1 ? `${yg.per} lines per car` : '8 words each', Y.x0 + 10 + yardTitleW + 6, Y.y0 + 10, { size: 7.5, weight: 500, color: PAL.ink3 });
     for (const lb of yg.labels) this.label(lb.name, lb.x, lb.y, { size: yg.inline ? 5.5 : 6.5, weight: 800, color: PAL.ink3, spacing: 0.3 });
     if (!yg.cars.length) this.label('this timetable never touches memory', (Y.x0 + Y.x1) / 2, (Y.y0 + Y.y1) / 2, { size: 8, weight: 600, color: PAL.ink3, align: 'center' });
     // Legend: seat colors, then where a line is.
@@ -1284,7 +1326,7 @@ export class NetworkView {
     const model = yardModel(this.tr);
     const y0 = Y.y0 + 20;
     const y1 = Y.y1 - 16;
-    const tryLayout = (sw, inline) => {
+    const tryLayout = (regions, sw, inline) => {
       const x0 = Y.x0 + 8 + (inline ? 0 : 32);
       const x1 = Y.x1 - 8;
       const w = 8 * sw + 2;
@@ -1296,7 +1338,7 @@ export class NetworkView {
       const labels = [];
       let y = y0;
       let x = x0;
-      for (const reg of model.regions) {
+      for (const reg of regions) {
         const top = y;
         if (inline) {
           // Short tag, then the cars; wrap if the tag and a car won't fit.
@@ -1325,7 +1367,7 @@ export class NetworkView {
           }
           cars.push({ m, x: x + gap, y, w, h, sw, join: join && gap > 0 });
           x += gap + w;
-          prev = m.line;
+          prev = m.last ?? m.line;
           first = false;
         }
         if (!inline) y = Math.max(y + h + rowGap + 2.5, top + 10);
@@ -1333,15 +1375,29 @@ export class NetworkView {
       const bottom = inline ? y + rowH : y - rowGap - 2.5;
       return { cars, labels, inline, fits: bottom <= y1 };
     };
-    let geom = null;
-    for (const inline of [false, true]) {
-      for (let sw = 3.4; sw >= (inline ? 0.2 : 0.9) && !geom; sw -= 0.05) {
-        const g = tryLayout(sw, inline);
-        if (g.fits) geom = g;
+    const search = (regions) => {
+      for (const inline of [false, true]) {
+        for (let sw = 3.4; sw >= (inline ? 0.2 : 0.9); sw -= 0.05) {
+          const g = tryLayout(regions, sw, inline);
+          if (g.fits) return g;
+        }
       }
-      if (geom) break;
+      return null;
+    };
+    // One car per line while they fit; past that, each car carries `per`
+    // neighboring lines, as few as will fit.
+    let geom = search(model.regions);
+    let per = 1;
+    if (!geom) {
+      const room = tryLayout(model.regions, 0.2, true).cars.filter((car) => car.y + car.h <= y1).length;
+      per = Math.max(2, Math.ceil(model.lines.length / Math.max(1, room)));
+      while (!geom) {
+        geom = search(model.regions.map((reg) => ({ ...reg, lines: groupLines(reg.lines, per) })));
+        if (!geom) per++;
+      }
     }
-    this.yardGeom = geom || tryLayout(0.2, true);
+    geom.per = per;
+    this.yardGeom = geom;
     return this.yardGeom;
   }
 
@@ -1377,7 +1433,8 @@ export class NetworkView {
     const selLines = new Map(sel.map((e) => [e.line, e.mask]));
     for (const car of g.cars) {
       const m = car.m;
-      byLine.set(m.line, car);
+      if (m.members) for (const x of m.members) byLine.set(x.line, car);
+      else byLine.set(m.line, car);
       const where = lineWhere(m, T);
       const r = Math.min(2.2, car.h / 2.6);
       rr(ctx, car.x, car.y, car.w, car.h, r);
@@ -1396,7 +1453,9 @@ export class NetworkView {
         }
       }
       // Seats: one per 8-byte word, colored by how its latest access went.
-      const sw = (car.w - 2) / 8;
+      // A car carrying several lines has a seat per line (or per few).
+      const seats = m.members ? Math.min(8, m.members.length) : 8;
+      const sw = (car.w - 2) / seats;
       let flash = null;
       for (let k = m.acc.length - 1; k >= 0; k--) {
         const x = m.acc[k];
@@ -1406,13 +1465,17 @@ export class NetworkView {
         }
         if (x.t < T - 1.1) break;
       }
-      for (let w = 0; w < 8; w++) {
+      const lastIn = m.members ? seatLatest(m, seats, T) : null;
+      for (let w = 0; w < seats; w++) {
         let last = null;
-        for (let k = m.acc.length - 1; k >= 0; k--) {
-          const x = m.acc[k];
-          if (x.t <= T && x.e.mask & (1 << w)) {
-            last = x;
-            break;
+        if (lastIn) last = lastIn[w];
+        else {
+          for (let k = m.acc.length - 1; k >= 0; k--) {
+            const x = m.acc[k];
+            if (x.t <= T && x.e.mask & (1 << w)) {
+              last = x;
+              break;
+            }
           }
         }
         if (!last) continue;
@@ -1445,7 +1508,7 @@ export class NetworkView {
         ctx.stroke();
         ctx.globalAlpha = 1;
       }
-      if (selLines.has(m.line) || this.hoverLine === m) {
+      if ((m.members ? m.members.some((x) => selLines.has(x.line)) : selLines.has(m.line)) || this.hoverLine === m) {
         rr(ctx, car.x - 2.5, car.y - 2.5, car.w + 5, car.h + 5, r + 2.5);
         ctx.strokeStyle = this.hoverLine === m ? PAL.ink : PAL.accent;
         ctx.lineWidth = 1.6;
