@@ -4,7 +4,7 @@ import { DEFAULT_WORKLOAD, generateWorkload, presetParams } from './workload.js'
 import { FLEET, LETTERS, LINE_COLORS, MAX_MACHINES, EXPERIMENTS, normalizeCfg } from './machine.js';
 import { simulate } from './sim.js';
 import { computeStats, findEpisodes, cycleStatus, fmtInt, fmtTime, stateClause, cycleAt, instrText, regVersions, lineWhere } from './analysis.js';
-import { CODE_INFO, LOC, OPS, regName, hex } from './isa.js';
+import { C, CODE_INFO, LOC, OPS, regName, hex } from './isa.js';
 import { readPalette } from './palette.js';
 import { h, svg, showMenu, closeMenu } from './dom.js';
 import { Planner } from './planner.js';
@@ -13,6 +13,7 @@ import { Inspector } from './inspector.js';
 import { renderReport } from './report.js';
 import { Scrubber } from './scrubber.js';
 import { renderLegend, renderGuide } from './guide.js';
+import { Sound } from './audio.js';
 
 const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
@@ -46,6 +47,7 @@ const els = {
   sync: $('tp-sync'),
   tooltip: $('tooltip'),
   guide: $('guide'),
+  sound: $('tp-sound'),
 };
 
 const app = {
@@ -289,6 +291,7 @@ function unitsPerCycle() {
 
 function setPlaying(on) {
   if (on && state.t >= state.tMax - 1e-9) state.t = 0;
+  if (on !== state.playing) sound.play(on);
   state.playing = on;
   els.play.classList.toggle('is-playing', on);
   els.play.setAttribute('aria-label', on ? 'Pause' : 'Play');
@@ -338,6 +341,7 @@ function nextStall() {
   const len = best.ep.end - best.ep.start;
   best.M.stallNote = `Stall: nothing departs for ${len} ${len === 1 ? 'cycle' : 'cycles'} (${CODE_INFO[best.ep.code].label.toLowerCase()}).`;
   best.M.lastStatusC = null;
+  sound.stall(best.ep.code === C.BRANCH ? 'branch' : 'mem');
   state.dirty = true;
   best.M.el.root.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'nearest' });
 }
@@ -390,10 +394,40 @@ function drawAll() {
   if (hoverState) showTooltip(hoverState);
 }
 
+// Sound follows time only while it runs forward by itself: playing, or
+// stepping ahead. Scrubs and jumps resync quietly.
+function listen(moving) {
+  const n = state.machines.length;
+  const perSec = state.playing ? state.speed * unitsPerCycle() : 1 / 0.26;
+  state.machines.forEach((M, i) => {
+    sound.follow(M, app.localCycle(M), {
+      moving,
+      focus: n === 1 || M.uid === state.focus,
+      pan: n === 1 ? 0 : -0.45 + (0.9 * i) / (n - 1),
+      rate: state.sync === 'cycle' ? perSec : perSec * M.cfg.ghz,
+      crowd: n,
+    });
+  });
+}
+
+function setSound(on) {
+  sound.setOn(on);
+  showSound(on);
+}
+
+function showSound(on) {
+  els.sound.setAttribute('aria-pressed', String(on));
+  els.sound.setAttribute('aria-label', on ? 'Mute sound' : 'Turn sound on');
+  els.sound.title = on ? 'Mute sound (M)' : 'Turn sound on (M)';
+}
+
 let last = performance.now();
 function frame(now) {
   const dt = Math.min(0.1, (now - last) / 1000);
   last = now;
+  // Decided before this frame's move, so the last step of a hop (or the
+  // final cycle of a run) is still heard.
+  const moving = state.playing || (state.stepTo != null && state.stepTo > state.t);
   if (state.playing) {
     state.t = Math.min(state.tMax, state.t + dt * state.speed * unitsPerCycle());
     if (state.t >= state.tMax) setPlaying(false);
@@ -414,6 +448,7 @@ function frame(now) {
     state.dirty = false;
     drawAll();
   }
+  listen(moving);
   requestAnimationFrame(frame);
 }
 
@@ -608,6 +643,7 @@ function sizeViews() {
 // --------------------------------------------------------------------- Boot
 
 readPalette();
+const sound = new Sound();
 const planner = new Planner($('planner'), app);
 const inspector = new Inspector($('inspector'), app);
 const scrubber = new Scrubber($('tp-canvas'), (t) => {
@@ -634,6 +670,8 @@ $('tp-restart').addEventListener('click', () => {
   state.dirty = true;
 });
 $('tp-stall').addEventListener('click', nextStall);
+showSound(sound.on);
+els.sound.addEventListener('click', () => setSound(!sound.on));
 els.speed.value = String(state.speed);
 els.speed.classList.add('select');
 els.speed.addEventListener('change', () => {
@@ -686,6 +724,8 @@ document.addEventListener('keydown', (e) => {
     step(-1, e.shiftKey ? 10 : 1);
   } else if (e.key === 'n' || e.key === 'N') {
     nextStall();
+  } else if (e.key === 'm' || e.key === 'M') {
+    setSound(!sound.on);
   } else if (e.key === 'Home') {
     state.t = 0;
     state.stepTo = null;
