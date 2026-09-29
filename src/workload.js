@@ -50,6 +50,16 @@ export const PRESETS = [
   },
 ];
 
+// Kinds of branch site. Predictability sets how many are data-dependent
+// (no predictor can learn those) and how often the rest break their habit.
+export const SITE_KINDS = {
+  loop: { label: 'loop', plural: 'loops', many: 'loop branches' },
+  pattern: { label: 'pattern', plural: 'patterns', many: 'branches with a repeating pattern' },
+  biased: { label: 'one-way', plural: 'one-way', many: 'branches that nearly always go the same way' },
+  follow: { label: 'follower', plural: 'followers', many: 'branches that follow the branch before them' },
+  random: { label: 'data-dependent', plural: 'data-dependent', many: 'data-dependent branches' },
+};
+
 export const DEFAULT_WORKLOAD = { preset: 'array', seed: 2718, warm: true, ...PRESETS[2].params };
 
 export function presetParams(id, base = {}) {
@@ -116,6 +126,7 @@ export function generateWorkload(params) {
   const rD = makeRng(P.seed, 'deps');
   const rA = makeRng(P.seed, 'addr');
   const rB = makeRng(P.seed, 'branch');
+  const rS = makeRng(P.seed, 'branch-sites');
   const rV = makeRng(P.seed, 'vector');
   const rT = makeRng(P.seed, 'value-type');
   const rW = makeRng(P.seed, 'warm');
@@ -144,6 +155,64 @@ export function generateWorkload(params) {
   const target = { int: share.int * N, fp: share.fp * N, mem: share.mem * N, branch: share.branch * N };
   const made = { int: 0, fp: 0, mem: 0, branch: 0 };
   const fpLoadShare = share.fp + share.int > 0 ? share.fp / (share.fp + share.int) : 0.5;
+
+  // Branch sites: the handful of places in the code the branches come from.
+  // Each dynamic branch belongs to one, usually the next one along, as when
+  // the same code runs again, and goes the way its site's habit says.
+  const nSites = Math.max(1, Math.min(16, Math.ceil(target.branch / 6)));
+  const flip = 0.005 + 0.1 * (1 - P.predictability);
+  const shareRandom = Math.min(1, 2 * (1 - P.predictability));
+  const nRandom = Math.floor(nSites * shareRandom) + (rS.next() < (nSites * shareRandom) % 1 ? 1 : 0);
+  const sites = [];
+  for (let k = 0; k < nSites; k++) {
+    const kind = k < nRandom ? 'random' : ['biased', 'loop', 'pattern', 'follow'][rS.weighted([0.5, 0.3, 0.1, 0.1])];
+    const site = { id: k, kind, back: kind === 'loop', pos: 0 };
+    if (kind === 'random') site.p = 0.35 + 0.3 * rS.next();
+    else if (kind === 'biased') site.way = rS.next() < 0.5;
+    else if (kind === 'loop') site.period = rS.int(4, 16);
+    else if (kind === 'pattern') {
+      const len = rS.int(2, 4);
+      do site.pattern = Array.from({ length: len }, () => rS.next() < 0.5);
+      while (site.pattern.every((t) => t === site.pattern[0]));
+    } else site.invert = rS.next() < 0.3;
+    sites.push(site);
+  }
+  // Shuffle so data-dependent sites are not always the first ones.
+  for (let k = sites.length - 1; k > 0; k--) {
+    const j = rS.int(0, k);
+    [sites[k], sites[j]] = [sites[j], sites[k]];
+  }
+  sites.forEach((st, k) => (st.id = k));
+  let prevSite = sites.length - 1;
+  let lastTaken = false;
+  function nextBranch(rng) {
+    const s = rng.next() < 0.7 ? (prevSite + 1) % sites.length : rng.int(0, sites.length - 1);
+    const st = sites[s];
+    let t;
+    if (st.kind === 'random') t = rng.next() < st.p;
+    else {
+      if (st.kind === 'biased') t = st.way;
+      else if (st.kind === 'loop') t = st.pos < st.period - 1;
+      else if (st.kind === 'pattern') t = st.pattern[st.pos % st.pattern.length];
+      else t = st.invert ? !lastTaken : lastTaken;
+      st.pos = (st.pos + 1) % (st.kind === 'loop' ? st.period : st.kind === 'pattern' ? st.pattern.length : 1);
+      if (rng.next() < flip) t = !t;
+    }
+    prevSite = s;
+    lastTaken = t;
+    return [s, t];
+  }
+  // Warm-up history: the branches earlier runs of this code went through,
+  // so a warm predictor has already learned each site's habit.
+  const nWarm = Math.min(4096, 128 * nSites);
+  const warmBranches = { site: new Uint8Array(nWarm), taken: new Uint8Array(nWarm) };
+  if (target.branch > 0) {
+    for (let k = 0; k < nWarm; k++) {
+      const [s, t] = nextBranch(rB);
+      warmBranches.site[k] = s;
+      warmBranches.taken[k] = t ? 1 : 0;
+    }
+  }
 
   const ops = [];
   const loops = [];
@@ -237,9 +306,9 @@ export function generateWorkload(params) {
           }
         }
       }
-      const o = { i, op, cls, type: def.type, src, addr: null, mispredict: false, vec: null, vt: null };
+      const o = { i, op, cls, type: def.type, src, addr: null, site: -1, taken: false, vec: null, vt: null };
       if (def.type === 'load' || def.type === 'store') o.addr = scalarAddr(rA, heap);
-      if (def.type === 'branch') o.mispredict = rB.next() > P.predictability;
+      if (def.type === 'branch') [o.site, o.taken] = nextBranch(rB);
       if (def.type === 'load') o.vt = rT.next() < fpLoadShare ? 'f' : 'i';
       else if (def.cls === 'fp') o.vt = 'f';
       else if (def.cls === 'int') o.vt = 'i';
@@ -308,7 +377,8 @@ export function generateWorkload(params) {
           type: def.type,
           src: t.deps.map((d) => base + d),
           addr: null,
-          mispredict: false,
+          site: -1,
+          taken: false,
           vec: { loop: loopId, elem: e, slot: s },
           vt: null,
         };
@@ -385,10 +455,14 @@ export function generateWorkload(params) {
   }
 
   const counts = { int: 0, fp: 0, load: 0, store: 0, branch: 0 };
-  let mispredicts = 0;
+  const siteKinds = Object.fromEntries(Object.keys(SITE_KINDS).map((k) => [k, 0]));
+  const siteSeen = new Set();
   for (const o of ops) {
     counts[o.type]++;
-    if (o.mispredict) mispredicts++;
+    if (o.type === 'branch' && !siteSeen.has(o.site)) {
+      siteSeen.add(o.site);
+      siteKinds[sites[o.site].kind]++;
+    }
   }
 
   return {
@@ -397,6 +471,8 @@ export function generateWorkload(params) {
     loops,
     arrays: arrays.map((a) => ({ id: a.id, base: a.base, bytes: a.bytes, stride: a.stride })),
     warmLines,
+    branchSites: sites.map(({ pos, ...st }) => st),
+    warmBranches,
     summary: {
       N: ops.length,
       counts,
@@ -407,7 +483,8 @@ export function generateWorkload(params) {
       heapBytes,
       arrayBytes,
       scalarMem,
-      mispredicts,
+      branchSites: siteSeen.size,
+      siteKinds,
       locality,
       lines: seenLine.size,
     },

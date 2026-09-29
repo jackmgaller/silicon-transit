@@ -91,13 +91,14 @@ export function buildDrawer(M, app, diffKeys) {
         const sel = h('select', { class: 'select', id, 'aria-label': p.label },
           p.options.map((v) => h('option', { value: String(v), selected: cfg[p.key] === v }, formatParam(p.key, v))),
         );
-        sel.addEventListener('change', () => app.setMachineParam(M, p.key, +sel.value));
+        sel.addEventListener('change', () => app.setMachineParam(M, p.key, typeof p.options[0] === 'string' ? sel.value : +sel.value));
         control = sel;
       }
       const unit = p.kind === 'step' && p.unit ? h('small', null, p.unit.trim()) : null;
+      const help = typeof p.help === 'function' ? p.help(cfg) : p.help;
       group.append(
-        h('div', { class: 'param' + (diffKeys.has(p.key) ? ' is-changed' : ''), title: p.help || null },
-          h('label', { class: 'param-label', for: p.kind === 'select' ? id : null }, h('span', { class: 'param-name' }, p.label), p.help ? h('small', null, p.help) : unit),
+        h('div', { class: 'param' + (diffKeys.has(p.key) ? ' is-changed' : ''), title: help || null },
+          h('label', { class: 'param-label', for: p.kind === 'select' ? id : null }, h('span', { class: 'param-name' }, p.label), help ? h('small', null, help) : unit),
           control,
         ),
       );

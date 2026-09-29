@@ -24,7 +24,7 @@ export function renderReport(root, app) {
       h('div', { class: 'report-meta' },
         h('span', null, 'Timetable ', h('b', null, preset ? preset.name : 'Custom')),
         h('span', null, h('b', null, fmtInt(workload.ops.length)), ' operations'),
-        h('span', null, 'Caches ', h('b', null, wl.warm ? 'warm' : 'cold')),
+        h('span', null, 'Start ', h('b', null, wl.warm ? 'warm' : 'cold')),
         h('span', null, 'Seed ', h('b', null, String(wl.seed))),
       ),
     ),

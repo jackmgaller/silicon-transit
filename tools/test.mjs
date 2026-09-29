@@ -5,6 +5,7 @@ import { FLEET, EXPERIMENTS, normalizeCfg } from '../src/machine.js';
 import { simulate } from '../src/sim.js';
 import { computeStats, findEpisodes, cycleStatus, instrStory, compareNarrative, bottleneck, yardModel, localityWhy, accessTime } from '../src/analysis.js';
 import { C, LOC, NREG } from '../src/isa.js';
+import { PREDICTORS, countWrong } from '../src/predictor.js';
 
 let failures = 0;
 const fail = (msg) => {
@@ -61,6 +62,17 @@ function check(tr, tag) {
   for (let k = 0; k < seen.length; k++) if (seen[k] !== 1) fail(`${tag}: op ${k} covered ${seen[k]} times`);
   checkRegisters(tr, tag);
   checkCaches(tr, tag);
+  checkBranches(tr, tag);
+}
+
+// Every wrong guess closes the entrance once, and the trace's wrong guesses
+// are the ones this network's predictor made.
+function checkBranches(tr, tag) {
+  const wrong = tr.instrs.filter((ins) => ins.mispredict).length;
+  if (tr.mispredicts.length !== wrong) fail(`${tag}: ${tr.mispredicts.length} entrance holds for ${wrong} wrong guesses`);
+  if (wrong !== countWrong(tr.workload, tr.cfg.predictor)) fail(`${tag}: ${wrong} wrong guesses, predictor says ${countWrong(tr.workload, tr.cfg.predictor)}`);
+  if (tr.cfg.predictor === 'perfect' && wrong) fail(`${tag}: perfect predictor guessed wrong`);
+  for (const ins of tr.instrs) if (ins.type !== 'branch' && ins.mispredict) fail(`${tag} #${ins.id}: non-branch mispredicted`);
 }
 
 // Register names: every source is read from the register its producer wrote,
@@ -144,7 +156,7 @@ for (const p of PRESETS) {
   const wl = generateWorkload(presetParams(p.id, { seed: 2718, warm: true }));
   const wl2 = generateWorkload(presetParams(p.id, { seed: 2718, warm: true }));
   if (JSON.stringify(wl.ops) !== JSON.stringify(wl2.ops)) fail(`${p.id}: workload not deterministic`);
-  const row = { preset: p.id, ops: wl.ops.length, s: wl.summary };
+  const row = { preset: p.id, ops: wl.ops.length, s: wl.summary, wl };
   for (const m of FLEET) {
     const cfg = normalizeCfg(m.cfg);
     const tr = simulate(wl, cfg);
@@ -196,7 +208,7 @@ for (const row of rows) {
     };
     const wl = generateWorkload(params);
     for (const m of [FLEET[0], FLEET[2], FLEET[4]]) {
-      const cfg = normalizeCfg({ ...m.cfg, renameRegs: k % 3 === 0 ? 0 : m.cfg.renameRegs });
+      const cfg = normalizeCfg({ ...m.cfg, renameRegs: k % 3 === 0 ? 0 : m.cfg.renameRegs, predictor: PREDICTORS[k % PREDICTORS.length].id });
       check(simulate(wl, cfg), `random${k}/${m.id}`);
     }
   }
@@ -215,7 +227,7 @@ for (const row of rows) {
 }
 for (const row of rows) {
   const s = row.s;
-  console.log(`${pad(row.preset, 12)} counts ${JSON.stringify(s.counts)} vec ${s.vecOps} loops ${s.loops} arrays ${s.arrays} heap ${s.heapBytes} arr ${s.arrayBytes} mp ${s.mispredicts}`);
+  console.log(`${pad(row.preset, 12)} counts ${JSON.stringify(s.counts)} vec ${s.vecOps} loops ${s.loops} arrays ${s.arrays} heap ${s.heapBytes} arr ${s.arrayBytes} wrong ${PREDICTORS.map((p) => p.id + ':' + countWrong(row.wl, p.id)).join(' ')}`);
 }
 console.log(failures ? `\n${failures} FAILURES` : '\nall invariants hold');
 process.exit(failures ? 1 : 0);

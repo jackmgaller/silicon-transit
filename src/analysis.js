@@ -2,7 +2,8 @@
 
 import { C, CODE_INFO, SLOT_CODES, LVL, OPS, UNIT_LABEL, UNIT_PLURAL, UNIT_NOUN, LOC, NREG, regName, hex } from './isa.js';
 import { describeDiff, formatParam } from './machine.js';
-import { HOT_BASE, HOT_BYTES, HEAP_BASE, ARRAY_BASE, ARRAY_STRIDE } from './workload.js';
+import { HOT_BASE, HOT_BYTES, HEAP_BASE, ARRAY_BASE, ARRAY_STRIDE, SITE_KINDS } from './workload.js';
+import { PREDICTOR_BY_ID } from './predictor.js';
 
 export const fmtInt = (n) => Math.round(n).toLocaleString('en-US');
 export const pct = (x, d = 0) => (x == null ? '—' : (x * 100).toFixed(d) + '%');
@@ -730,7 +731,7 @@ export function instrStory(tr, id) {
     totals.ride = dn - i;
   }
   const doneText = ins.mispredict
-    ? 'Resolved: the branch had been predicted wrong, so the entrance reopens now.'
+    ? `Resolved: it went ${way(ins.taken)}, but the entrance had guessed ${way(ins.guessed)}. The entrance reopens now.`
     : ins.type === 'store'
       ? 'Address and data ready. The store is written to the cache when it exits.'
       : ins.type === 'branch'
@@ -806,11 +807,33 @@ export function describeInstr(tr, id) {
       ? `its address comes from an earlier load, ${names}, so it cannot start until that one returns`
       : `its address is calculated by ${names}, so it waits for that result`);
   }
-  if (ins.mispredict) where.push('the branch predictor guesses this one wrong');
+  if (ins.type === 'branch') {
+    const st = w.branchSites[ins.site];
+    where.push(`it comes from place ${ins.site + 1} in the code, ${siteHabit(st)}`);
+    where.push(`its predictor (${PREDICTOR_BY_ID[tr.cfg.predictor].label}) guessed ${way(ins.guessed)} and it went ${way(ins.taken)}${ins.mispredict ? ', so the entrance took the wrong route' : ''}`);
+  }
   const regs = [];
   if (ins.srcRegs.length) regs.push(`reads ${joinList(ins.srcRegs.map(regName))}`);
   if (ins.dst >= 0) regs.push(`writes its result to ${regName(ins.dst)}`);
   return { what, where, regs: regs.length ? capitalize(joinList(regs)) + '.' : '' };
+}
+
+const way = (taken) => (taken ? 'taken' : 'not taken');
+
+// A branch site's habit, in words.
+export function siteHabit(st) {
+  if (st.kind === 'loop') return `a loop branch: taken ${st.period - 1} times, then not taken as the loop exits`;
+  if (st.kind === 'pattern') return `a branch with a repeating pattern (${st.pattern.map(way).join(', ')}, then again)`;
+  if (st.kind === 'biased') return `a branch that is nearly always ${way(st.way)}`;
+  if (st.kind === 'follow') return `a branch that goes ${st.invert ? 'the opposite way to' : 'the same way as'} the branch before it`;
+  return 'a data-dependent branch, a coin toss no predictor can learn';
+}
+
+// Wrong guesses by kind of branch site.
+function wrongByKind(tr) {
+  const out = Object.fromEntries(Object.keys(SITE_KINDS).map((k) => [k, 0]));
+  for (const ins of tr.instrs) if (ins.mispredict) out[tr.workload.branchSites[ins.site].kind]++;
+  return out;
 }
 
 function capitalize(s) {
@@ -915,6 +938,23 @@ export function compareNarrative(A, B) {
   }
   if (keys.has('feDepth') && sa.mispredicts) {
     add(0.1 + Math.abs(slotPct(sa, C.BRANCH) - slotPct(sb, C.BRANCH)), `Each wrong-route branch costs a ${B.cfg.feDepth}-stop refill instead of ${A.cfg.feDepth}. Recovery used ${pct(slotPct(sb, C.BRANCH))} of capacity (was ${pct(slotPct(sa, C.BRANCH))}).`);
+  }
+  if (keys.has('predictor')) {
+    const nb = sb.count.branch;
+    const pa = PREDICTOR_BY_ID[A.cfg.predictor].label;
+    const pb = PREDICTOR_BY_ID[B.cfg.predictor].label;
+    if (!nb) add(0.04, `Route guessing changed nothing: this timetable has no branches.`);
+    else {
+      add(0.1 + Math.abs(slotPct(sa, C.BRANCH) - slotPct(sb, C.BRANCH)), `${pb} guessed ${sb.mispredicts} of ${nb} branches wrong, versus ${sa.mispredicts} with ${pa}. Wrong-route recovery used ${pct(slotPct(sb, C.BRANCH))} of departure capacity (was ${pct(slotPct(sa, C.BRANCH))}).`);
+      // Which kind of branch made the difference.
+      const ka = wrongByKind(ta);
+      const kb = wrongByKind(tb);
+      // Coin tosses swing by luck alone, so only an oracle is credited with them.
+      const oracle = A.cfg.predictor === 'perfect' || B.cfg.predictor === 'perfect';
+      const kind = Object.keys(ka).filter((k) => oracle || k !== 'random').reduce((a, k) => (Math.abs(ka[k] - kb[k]) > Math.abs(ka[a] - kb[a]) ? k : a));
+      if (ka[kind] !== kb[kind]) add(0.08, `Most of the change came from ${SITE_KINDS[kind].many}: ${ka[kind]} wrong ${plural(ka[kind], 'guess', 'guesses')} became ${kb[kind]}.`);
+      if (kb.random && kb.random >= sb.mispredicts / 2) add(0.05, `${kb.random} of ${B.name}’s wrong guesses are data-dependent branches that no predictor can learn.`);
+    }
   }
   if (keys.has('memNs')) {
     add(0.1 + Math.abs(slotPct(sa, C.MEM) - slotPct(sb, C.MEM)), `Main memory is ${tb.MEMLAT} cycles away instead of ${ta.MEMLAT}. Average load time went from ${sa.avgLoad?.toFixed(1) ?? '—'} to ${sb.avgLoad?.toFixed(1) ?? '—'} cycles.`);

@@ -2,7 +2,7 @@
 // and a strip preview of the generated program.
 
 import { h, svg, clear } from './dom.js';
-import { PRESETS, formatBytes } from './workload.js';
+import { PRESETS, SITE_KINDS, formatBytes } from './workload.js';
 import { PAL } from './palette.js';
 
 const ICONS = {
@@ -95,14 +95,13 @@ export class Planner {
       `${v < 0.3 ? 'Little reuse: data is rarely touched again.' : v < 0.7 ? 'Some data is used again soon.' : 'Heavy reuse of a small working set.'} Heap ≈ ${formatBytes(s.heapBytes)}${s.arrays ? `, arrays ≈ ${formatBytes(s.arrayBytes)} each` : ''}.${localityLine(s)}`));
     secB.append(slider('vector', 'Vectorizability', 0, 1, 0.01, pct, '--op-fp', (v, s) =>
       v <= 0.001 ? 'No loops that SIMD lanes could pack.' : `${s.vecOps} operations sit in ${s.loops} ${s.loops === 1 ? 'loop' : 'loops'} that SIMD lanes can pack.`));
-    secC.append(slider('predictability', 'Branch predictability', 0.5, 1, 0.01, pct, '--op-branch', (v, s) =>
-      s.counts.branch ? `${s.mispredicts} of ${s.counts.branch} branches will be guessed wrong.` : 'This timetable has no branches.'));
+    secC.append(slider('predictability', 'Branch predictability', 0.5, 1, 0.01, pct, '--op-branch', (v, s) => branchLine(s, app.state.machines)));
 
     const seedInput = h('input', { type: 'number', class: 'field-input', id: 'wl-seed', min: 1, max: 999999, inputmode: 'numeric' });
     seedInput.addEventListener('change', () => app.setWorkload('seed', Math.max(1, Math.round(+seedInput.value || 1))));
     this.seedInput = seedInput;
     const shuffle = h('button', { type: 'button', class: 'btn', onclick: () => app.setWorkload('seed', 1 + Math.floor(Math.random() * 99999)) }, 'Shuffle');
-    this.warmSeg = h('div', { class: 'seg seg-sm', role: 'radiogroup', 'aria-label': 'Cache start' },
+    this.warmSeg = h('div', { class: 'seg seg-sm', role: 'radiogroup', 'aria-label': 'Caches and predictors at start' },
       [['warm', 'Warm'], ['cold', 'Cold']].map(([v, l]) => h('button', { type: 'button', role: 'radio', 'data-v': v, onclick: () => app.setWorkload('warm', v === 'warm') }, l)),
     );
     secC.append(
@@ -111,8 +110,8 @@ export class Planner {
         shuffle,
       ),
       h('div', { class: 'field' },
-        h('div', { class: 'field-row' }, h('span', { class: 'field-label' }, 'Caches at start'), this.warmSeg),
-        h('span', { class: 'field-hint' }, 'Warm caches hold what earlier runs of this code left behind. Cold caches start empty.'),
+        h('div', { class: 'field-row' }, h('span', { class: 'field-label' }, 'Caches and predictors'), this.warmSeg),
+        h('span', { class: 'field-hint' }, 'Warm caches and predictors hold what earlier runs of this code left behind. Cold ones start empty and learn as they go.'),
       ),
     );
 
@@ -227,6 +226,10 @@ export class Planner {
     ctx.scale(dpr, dpr);
     ctx.clearRect(0, 0, w, hgt);
     const { ops, loops } = this.app.state.workload;
+    // Triangles mark the branches the baseline network guesses wrong.
+    const base = this.app.baseline();
+    const wrong = new Set();
+    if (base?.trace) for (const ins of base.trace.instrs) if (ins.mispredict) wrong.add(ins.ops[0]);
     const n = ops.length;
     const x0 = 6;
     const span = w - 12;
@@ -244,7 +247,7 @@ export class Planner {
       ctx.fillStyle = PAL.type[o.type];
       const tall = o.type === 'load' || o.type === 'store' ? 22 : 16;
       ctx.fillRect(x, 32 - tall, Math.max(0.8, bw - (bw > 3 ? 0.8 : 0)), tall);
-      if (o.mispredict) {
+      if (wrong.has(o.i)) {
         ctx.fillStyle = PAL.ink;
         ctx.beginPath();
         ctx.moveTo(x + bw / 2 - 3, 3);
@@ -266,4 +269,13 @@ export class Planner {
       ctx.fillText('vectorizable loops', w / 2, hgt - 0.5);
     }
   }
+}
+
+// Where the branches come from, and how many each network guesses wrong.
+function branchLine(s, machines) {
+  const n = s.counts.branch;
+  if (!n) return 'This timetable has no branches.';
+  const kinds = Object.entries(s.siteKinds).filter(([, k]) => k).map(([kind, k]) => `${k} ${k === 1 ? SITE_KINDS[kind].label : SITE_KINDS[kind].plural}`);
+  const wrong = machines.filter((M) => M.trace).map((M) => `${M.letter} ${M.trace.mispredicts.length}`);
+  return `${n} branches from ${s.branchSites} ${s.branchSites === 1 ? 'place' : 'places'} in the code (${kinds.join(', ')}).${wrong.length ? ` Guessed wrong: ${wrong.join(', ')}.` : ''}`;
 }

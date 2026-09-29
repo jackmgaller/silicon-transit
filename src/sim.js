@@ -6,6 +6,7 @@
 import { OPS, C, LVL, LOC, NREG } from './isa.js';
 import { Cache } from './cache.js';
 import { memCycles, busCycles } from './machine.js';
+import { predictBranches } from './predictor.js';
 
 // ---------------------------------------------------------------------------
 // Lowering: turn the workload's scalar operations into this machine's
@@ -17,6 +18,8 @@ export function lower(workload, cfg) {
   const W = cfg.simd;
   const instrs = [];
   const map = new Int32Array(ops.length).fill(-1);
+  // This network's guess for each branch: bit 0 taken, bit 1 guessed taken.
+  const guess = predictBranches(workload, cfg.predictor);
 
   const make = (laneOps, lanes, width, src, lines, masks) => {
     const first = ops[laneOps[0]];
@@ -36,7 +39,10 @@ export function lower(workload, cfg) {
       lines,
       masks,
       addr: first.addr,
-      mispredict: first.mispredict,
+      site: first.site,
+      taken: first.taken,
+      guessed: (guess[first.i] & 2) !== 0,
+      mispredict: def.type === 'branch' && first.taken !== ((guess[first.i] & 2) !== 0),
       loop: first.vec ? first.vec.loop : -1,
       vslot: first.vec ? first.vec.slot : -1,
       num: laneOps[0],
