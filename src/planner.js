@@ -21,6 +21,9 @@ const MIX_KEYS = [
   ['branch', 'Branch', '--op-branch'],
 ];
 
+const ICON_COLLAPSE = '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M12.5 4.5 7 10l5.5 5.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const COLLAPSED_KEY = 'silicon-transit:planner-collapsed';
+
 const pct = (v) => Math.round(v * 100) + '%';
 
 // What the generated accesses actually do, in program order.
@@ -36,6 +39,23 @@ export class Planner {
     this.root = root;
     this.app = app;
     this.build();
+    let collapsed = false;
+    try {
+      collapsed = localStorage.getItem(COLLAPSED_KEY) === '1';
+    } catch {}
+    this.setCollapsed(collapsed);
+  }
+
+  // Folds the planner to a slim rail (or a single bar when it spans the
+  // page) so the maps get the room.
+  setCollapsed(on) {
+    this.collapsed = on;
+    document.getElementById('shell').classList.toggle('planner-collapsed', on);
+    this.toggle.setAttribute('aria-expanded', String(!on));
+    this.toggle.title = on ? 'Show the workload planner' : 'Hide the workload planner';
+    try {
+      localStorage.setItem(COLLAPSED_KEY, on ? '1' : '0');
+    } catch {}
   }
 
   build() {
@@ -47,7 +67,11 @@ export class Planner {
     const secA = h('div', { class: 'pl-sec' });
     const secB = h('div', { class: 'pl-sec' });
     const secC = h('div', { class: 'pl-sec' });
-    root.append(secA, secB, secC);
+    this.toggle = h('button', { type: 'button', class: 'pl-toggle', 'aria-controls': 'planner', onclick: () => this.setCollapsed(!this.collapsed) },
+      svg(ICON_COLLAPSE),
+      h('span', { class: 'pl-toggle-label' }, 'Workload planner'),
+    );
+    root.append(this.toggle, secA, secB, secC);
     secA.append(
       h('div', { class: 'planner-head' },
         h('p', { class: 'eyebrow' }, 'Timetable'),

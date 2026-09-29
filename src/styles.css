@@ -549,8 +549,92 @@ select {
   min-width: 0;
 }
 
+.planner-head {
+  padding-right: 30px;
+}
+
 .planner-head .section-title {
   font-size: 17px;
+}
+
+/* Collapse handle: a quiet chevron in the corner while open; folded, it is
+   the whole rail, labelled down its length. */
+.pl-toggle {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink-3);
+  font: inherit;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.pl-toggle:hover {
+  color: var(--ink);
+  background: var(--glass);
+  border-color: var(--rule);
+}
+
+.pl-toggle svg {
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+
+.pl-toggle-label {
+  display: none;
+}
+
+.shell.planner-collapsed {
+  grid-template-columns: 52px minmax(0, 1fr);
+}
+
+.shell.planner-collapsed.has-inspector {
+  grid-template-columns: 52px minmax(0, 1fr) 340px;
+}
+
+.planner-collapsed .planner {
+  padding: 6px;
+}
+
+.planner-collapsed .pl-sec {
+  display: none;
+}
+
+.planner-collapsed .pl-toggle {
+  position: static;
+  flex-direction: column;
+  justify-content: flex-start;
+  width: 100%;
+  height: auto;
+  padding: 10px 0 14px;
+  border-radius: calc(var(--r-xl) - 6px);
+  color: var(--ink-2);
+}
+
+.planner-collapsed .pl-toggle svg {
+  transform: rotate(180deg);
+}
+
+.planner-collapsed .pl-toggle-label {
+  display: block;
+  writing-mode: vertical-rl;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
 }
 
 .planner-head p {
@@ -2041,7 +2125,8 @@ select {
 /* Below very wide screens, the planner steps aside while inspecting so the
    maps keep their size. */
 @media (max-width: 1799px) {
-  .shell.has-inspector {
+  .shell.has-inspector,
+  .shell.planner-collapsed.has-inspector {
     grid-template-columns: minmax(0, 1fr) 350px;
   }
   .shell.has-inspector .planner {
@@ -2054,13 +2139,35 @@ select {
   .shell.has-inspector {
     grid-template-columns: minmax(0, 1fr);
   }
+  .shell.planner-collapsed,
+  .shell.planner-collapsed.has-inspector {
+    grid-template-columns: minmax(0, 1fr);
+  }
   .planner {
-    position: static;
+    position: relative;
     max-height: none;
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
     gap: 18px 26px;
     align-items: start;
+  }
+  .pl-toggle svg {
+    transform: rotate(90deg);
+  }
+  .planner-collapsed .planner {
+    display: block;
+  }
+  .planner-collapsed .pl-toggle {
+    flex-direction: row;
+    justify-content: flex-start;
+    padding: 6px 12px;
+    border-radius: 999px;
+  }
+  .planner-collapsed .pl-toggle svg {
+    transform: rotate(-90deg);
+  }
+  .planner-collapsed .pl-toggle-label {
+    writing-mode: horizontal-tb;
   }
   .inspector {
     position: fixed;
